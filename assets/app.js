@@ -275,6 +275,7 @@ function renderStage() {
     ${cur.pass ? '' : `<button data-a="check" class="primary">확인</button>`}
     ${cur.msg ? `<p class="msg ${cur.pass ? 'good' : 'badmsg'}">${cur.msg}</p>` : ''}
     ${after}
+    ${cur.pass && cur.share ? `<button data-a="share">기록 남기기</button>` : ''}
   </div>`;
 
   const d = app.querySelector('details');
@@ -297,6 +298,7 @@ function check() {
   }
   const s = cur.s, cost = costOf(cur.circ);
   cur.pass = true;
+  cur.share = null;
   cur.sel = null;
   if (s.rounds) {
     cur.round++;
@@ -312,6 +314,25 @@ function check() {
   if (s.par) m += cost <= s.par ? ` NAND ${cost}개 몫 — 별 두 개.` : ` NAND ${cost}개 몫. ${s.par}개 이하면 별 하나 더.`;
   if (first && s.unlock) m += ` 이제부터 <b>${s.unlock}</b>를 상자 하나로 써요.`;
   cur.msg = m;
+  cur.share = shareText(s, v);
+}
+
+// 기록 남기기 — 폰 공유창을 열어 문장만 채운다. 보내는 곳(메모 봇)은 누르는 사람이 고른다.
+function shareText(s, v) {
+  const book = STAGES.filter((x) => x.book === s.book);
+  const done = book.filter((x) => (save[x.id] || {}).solved).length;
+  const got = book.reduce((t, x) => t + starsOf(x), 0), all = book.reduce((t, x) => t + maxStars(x), 0);
+  const bk = BOOKS.find((x) => x.no === s.book);
+  if (done === book.length && s === book[book.length - 1]) return `NAND 게임 ${s.book}부(${bk.name}) 클리어! 별 ${got}/${all}`;
+  return `NAND 게임 ${s.id} ${s.title} ${starStr(s)}${v.count > 1 ? ` (${v.count}번째)` : ''} · ${s.book}부 ${done}/${book.length}`;
+}
+
+async function share(text) {
+  if (navigator.share) {
+    try { await navigator.share({ text }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const url = location.origin + location.pathname;
+  window.open(`https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`, '_blank');
 }
 
 function tap(e) { tapTarget(e.target.closest('[data-k],[data-a],[data-add],[data-row]')); }
@@ -351,6 +372,9 @@ function tapTarget(t) {
     } else if (a === 'reset') {
       change((c) => { c.parts = []; c.wires = {}; });
       cur.sel = null;
+    } else if (a === 'share') {
+      share(cur.share);
+      return;
     } else if (a === 'check') {
       check();
     } else if (a === 'round') {
