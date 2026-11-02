@@ -187,9 +187,13 @@ function boardSvg(spec, ev) {
   });
 
   // 점은 맨 위에 — 손가락이 닿는 넓은 투명 원 + 보이는 작은 원
+  cur.ports = [];
+  cur.rows = g.rows;
   const port = (k, key, [x, y], val) => {
     const on = sel && sel.t === k && sel.key === key;
-    return `<g data-k="${k}" data-key="${key}"><circle cx="${x}" cy="${y}" r="13" class="hit"/><circle cx="${x}" cy="${y}" r="${on ? 8 : 6}" class="port ${cls(val)}${on ? ' sel' : ''}"/></g>`;
+    cur.ports.push({ t: k, key, x, y });
+    const owner = key.startsWith('in:') || key.startsWith('out:') ? '' : ` data-owner="${key.split(':')[0]}"`;
+    return `<g data-k="${k}" data-key="${key}"${owner}><circle cx="${x}" cy="${y}" r="13" class="hit"/><circle cx="${x}" cy="${y}" r="${on ? 8 : 6}" class="port ${cls(val)}${on ? ' sel' : ''}"/></g>`;
   };
   spec.ins.forEach((_, i) => { s += port('src', 'in:' + i, g.srcPos('in:' + i), cur.inVals[i]); });
   spec.outs.forEach((_, i) => { s += port('sink', 'out:' + i, g.sinkPos('out:' + i), ev.outs[i]); });
@@ -203,7 +207,7 @@ function boardSvg(spec, ev) {
 
 function statusText() {
   const sel = cur.sel;
-  if (!sel) return cur.circ.parts.length ? '점 두 개를 차례로 누르면 선이 이어져요. 부품을 누르면 옮기거나 지울 수 있어요.' : '아래 단추로 부품을 놓아요.';
+  if (!sel) return cur.circ.parts.length ? '점에서 다른 점으로 끌면(또는 차례로 누르면) 선이 이어져요. 부품은 끌어서 옮기고, 누르면 지울 수 있어요.' : '아래 단추로 부품을 놓아요.';
   if (sel.t === 'src') return '이 신호를 보낼 곳 — 부품 왼쪽 점이나 출력 점을 누르세요.';
   if (sel.t === 'sink') return cur.circ.wires[sel.key] ? '다른 신호를 누르면 바꿔 이어요. 「선 끊기」로 끊어요.' : '이 점에 넣을 신호 — 입력이나 부품 오른쪽 점을 누르세요.';
   return '점선 빈 칸을 누르면 그리로 옮겨요.';
@@ -310,8 +314,9 @@ function check() {
   cur.msg = m;
 }
 
-function tap(e) {
-  const t = e.target.closest('[data-k],[data-a],[data-add],[data-row]');
+function tap(e) { tapTarget(e.target.closest('[data-k],[data-a],[data-add],[data-row]')); }
+
+function tapTarget(t) {
   if (!t) return;
   if (t.dataset.add) {
     const used = new Set(cur.circ.parts.map((p) => p.slot));
@@ -414,6 +419,109 @@ function route() {
   window.scrollTo(0, 0);
 }
 
-app.addEventListener('click', (e) => { if (cur) tap(e); });
+// ---------- 끌기 ----------
+// 판 위(점·부품·빈 곳)는 포인터로 처리한다. 거의 안 움직이고 떼면 탭, 움직이면 끌기.
+// 점에서 끌면 선이 따라오고, 놓은 곳 가까운 반대편 점에 붙는다. 선이 있는 받는 점을 끌어 빈 곳에 놓으면 끊긴다.
+// 부품을 끌면 그 칸으로 옮기고, 다른 부품이 있으면 자리를 바꾼다.
+let drag = null;
+const NS = 'http://www.w3.org/2000/svg';
+const toSvg = (svg, e) => { const m = svg.getScreenCTM().inverse(); return [e.clientX * m.a + e.clientY * m.c + m.e, e.clientX * m.b + e.clientY * m.d + m.f]; };
+function nearestPort(t, x, y, max) {
+  let best = null, bd = max * max;
+  for (const p of cur.ports) {
+    if (p.t !== t) continue;
+    const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+const slotAt = (x, y) => {
+  let col = 0;
+  COLX.forEach((cx, i) => { if (Math.abs(cx - x) < Math.abs(COLX[col] - x)) col = i; });
+  const row = Math.floor((y - 8) / ROWH);
+  return row < 0 || row >= cur.rows + 1 ? null : row * 3 + col;
+};
+
+app.addEventListener('pointerdown', (e) => {
+  if (!cur || drag) return;
+  const svg = e.target.closest('svg.board-svg');
+  if (!svg) return;
+  const t = e.target.closest('[data-k]');
+  if (!t) return;
+  drag = { t, svg, x0: e.clientX, y0: e.clientY, moved: false, id: e.pointerId };
+  const k = t.dataset.k;
+  if (k === 'src' || k === 'sink') {
+    drag.port = cur.ports.find((p) => p.t === k && p.key === t.dataset.key);
+  } else if (k === 'part') {
+    drag.part = t.dataset.id;
+    drag.els = [t, ...svg.querySelectorAll(`[data-owner="${t.dataset.id}"]`)];
+  }
+});
+
+app.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (!drag.moved && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 8) return;
+  if (!drag.port && !drag.part) return; // 빈 곳·입력 단추는 끌지 않는다(화면 넘기기)
+  drag.moved = true;
+  const [x, y] = toSvg(drag.svg, e);
+  if (drag.port) {
+    if (!drag.line) {
+      drag.line = document.createElementNS(NS, 'path');
+      drag.line.setAttribute('class', 'wire dragline');
+      drag.svg.appendChild(drag.line);
+      drag.mark = document.createElementNS(NS, 'circle');
+      drag.mark.setAttribute('r', '12');
+      drag.mark.setAttribute('class', 'dragmark');
+      drag.svg.appendChild(drag.mark);
+    }
+    const want = drag.port.t === 'src' ? 'sink' : 'src';
+    const hit = nearestPort(want, x, y, 30);
+    const [ex, ey] = hit ? [hit.x, hit.y] : [x, y];
+    const [a, z] = drag.port.t === 'src' ? [[drag.port.x, drag.port.y], [ex, ey]] : [[ex, ey], [drag.port.x, drag.port.y]];
+    const dx = Math.max(24, Math.abs(z[0] - a[0]) / 2);
+    drag.line.setAttribute('d', `M${a[0]} ${a[1]} C${a[0] + dx} ${a[1]} ${z[0] - dx} ${z[1]} ${z[0]} ${z[1]}`);
+    drag.mark.setAttribute('cx', ex); drag.mark.setAttribute('cy', ey);
+    drag.mark.style.display = hit ? '' : 'none';
+    drag.hit = hit;
+  } else {
+    const [x0, y0] = toSvg(drag.svg, { clientX: drag.x0, clientY: drag.y0 });
+    for (const el of drag.els) el.setAttribute('transform', `translate(${x - x0} ${y - y0})`);
+    drag.slot = slotAt(x, y);
+  }
+});
+
+function endDrag(e, cancel) {
+  if (!drag || e.pointerId !== drag.id) return;
+  const d = drag;
+  drag = null;
+  if (cancel) return renderStage();
+  if (!d.moved) { tapTarget(d.t); return; }
+  if (d.port) {
+    if (d.hit) {
+      const sink = d.port.t === 'sink' ? d.port.key : d.hit.key, src = d.port.t === 'src' ? d.port.key : d.hit.key;
+      change((c) => { c.wires[sink] = src; });
+    } else if (d.port.t === 'sink' && cur.circ.wires[d.port.key]) {
+      const key = d.port.key;
+      change((c) => { delete c.wires[key]; });
+    }
+  } else if (d.part && d.slot != null) {
+    const me = cur.circ.parts.find((p) => p.id === d.part);
+    if (me.slot !== d.slot) {
+      change((c) => {
+        const a = c.parts.find((p) => p.id === d.part), other = c.parts.find((p) => p.slot === d.slot);
+        if (other) other.slot = a.slot;
+        a.slot = d.slot;
+      });
+    }
+  }
+  cur.sel = null;
+  renderStage();
+}
+app.addEventListener('pointerup', (e) => endDrag(e, false));
+app.addEventListener('pointercancel', (e) => endDrag(e, true));
+// iOS는 SVG 안 touch-action을 안 따를 때가 있어, 점·부품을 끄는 동안만 화면 넘김을 막는다
+app.addEventListener('touchmove', (e) => { if (drag && (drag.port || drag.part)) e.preventDefault(); }, { passive: false });
+
+app.addEventListener('click', (e) => { if (cur && !e.target.closest('svg.board-svg')) tap(e); });
 window.addEventListener('hashchange', route);
 route();

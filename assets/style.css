@@ -110,3 +110,6 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .msg { margin: 0; }
 .msg.good { color: var(--ok); font-weight: 600; }
 .msg.badmsg { color: var(--x); }
+.board-svg [data-k="src"], .board-svg [data-k="sink"], .board-svg [data-k="part"] { touch-action: none; }
+.board-svg .dragline { stroke: var(--accent); stroke-dasharray: 6 4; pointer-events: none; }
+.board-svg .dragmark { fill: none; stroke: var(--accent); stroke-width: 2.5; pointer-events: none; }

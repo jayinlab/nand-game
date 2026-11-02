@@ -39,7 +39,7 @@ const OUT = ['출력'];
 export const STAGES = [
   {
     id: '1-1', book: 1, kind: '개념', title: 'NAND 만나기',
-    text: 'NAND는 두 입력이 <b>둘 다 1일 때만 0</b>을 내요. 점 두 개를 차례로 누르면 선이 이어져요 — A의 점 → NAND 왼쪽 점, B → 다른 왼쪽 점, NAND 오른쪽 점 → 출력.',
+    text: 'NAND는 두 입력이 <b>둘 다 1일 때만 0</b>을 내요. 점에서 점으로 끌면 선이 이어져요(차례로 눌러도 돼요) — A의 점 → NAND 왼쪽 점, B → 다른 왼쪽 점, NAND 오른쪽 점 → 출력.',
     hint: '아래 「NAND」 단추로 부품을 놓아요. 왼쪽 입력 단추를 누르면 0/1이 바뀌고, 표의 줄을 눌러도 돼요.',
     ins: AB, outs: OUT, par: 1, fn: ([a, c]) => [b(!(a && c))],
   },
