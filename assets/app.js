@@ -1,4 +1,4 @@
-import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, SCHED_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN, PM4_OPS, SH_REGS, PM4_NOTE, KERNELS, parsePm4, dwordOf, pm4Run, hex8, regOff, DISA, SHLIST, DRV_NOTE, RA_NOTE, PAGES, drvInit, drvStep, drvRun, drvOk, parseDrv, vaRead, raSubst, raLive } from './stages.js';
+import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, SCHED_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN, PM4_OPS, SH_REGS, PM4_NOTE, KERNELS, parsePm4, dwordOf, pm4Run, hex8, regOff, DISA, SHLIST, DRV_NOTE, RA_NOTE, PAGES, drvInit, drvStep, drvRun, drvOk, parseDrv, vaRead, raSubst, raLive, VKISA, VKKERNELS, VK_NOTE, vkInit, vkStep, vkRun, vkOk, parseVk, bufRead } from './stages.js';
 
 const app = document.getElementById('app');
 const SAVE = 'nand-game:v1';
@@ -420,15 +420,16 @@ function hookHints() {
 const isVec = (t) => !!t.asm.vec;
 const isCu = (t) => !!t.asm.cu;
 const isDrv = (t) => !!t.asm.drv;
-const isaOf = (t) => (t && t.asm && t.asm.drv ? DISA : VISA);
-const machInit = (t, k) => (isDrv(t) ? drvInit(t.asm.d, t.asm.tests[k] || {}) : isCu(t) ? cuInit(t.asm, t.asm.tests[k] || {}, cur.prog || []) : isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
-const machStep = (t, prog, m) => (isDrv(t) ? drvStep(t.asm.d, prog, m) : isCu(t) ? cuStep(prog, m) : isVec(t) ? vecStep(prog, m) : asmStep(prog, m));
-const machRun = (t, prog, k) => (isDrv(t) ? drvRun(t.asm.d, prog, t.asm.tests[k]) : isCu(t) ? cuRun(prog, t.asm, t.asm.tests[k]) : isVec(t) ? vecRun(prog, t.asm, t.asm.tests[k]) : asmRun(prog, ramOf(t, k)));
-const machOk = (t, x, m) => (isDrv(t) ? drvOk(x, m) : isCu(t) ? cuOk(x, m) : isVec(t) ? vecOk(x, m) : testOk(x, m));
+const isVk = (t) => !!t.asm.vk;
+const isaOf = (t) => (t && t.asm && t.asm.vk ? VKISA : t && t.asm && t.asm.drv ? DISA : VISA);
+const machInit = (t, k) => (isVk(t) ? vkInit(t.asm.v, t.asm.tests[k] || {}) : isDrv(t) ? drvInit(t.asm.d, t.asm.tests[k] || {}) : isCu(t) ? cuInit(t.asm, t.asm.tests[k] || {}, cur.prog || []) : isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
+const machStep = (t, prog, m) => (isVk(t) ? vkStep(t.asm.v, prog, m) : isDrv(t) ? drvStep(t.asm.d, prog, m) : isCu(t) ? cuStep(prog, m) : isVec(t) ? vecStep(prog, m) : asmStep(prog, m));
+const machRun = (t, prog, k) => (isVk(t) ? vkRun(t.asm.v, prog, t.asm.tests[k]) : isDrv(t) ? drvRun(t.asm.d, prog, t.asm.tests[k]) : isCu(t) ? cuRun(prog, t.asm, t.asm.tests[k]) : isVec(t) ? vecRun(prog, t.asm, t.asm.tests[k]) : asmRun(prog, ramOf(t, k)));
+const machOk = (t, x, m) => (isVk(t) ? vkOk(x, m) : isDrv(t) ? drvOk(x, m) : isCu(t) ? cuOk(x, m) : isVec(t) ? vecOk(x, m) : testOk(x, m));
 const memTxt = (o) => Object.entries(o || {}).map(([k, v]) => `[${k}]=${v}`).join(' ');
-const parseSol = (t) => (isDrv(t) ? parseDrv(t.sol) : isVec(t) ? parseVec(t.sol) : parseProg(t.sol));
-const VRANGE = { v: 4, s: 4, vs: 8, n: 16, k: 16, r: 4, g: 3, N: 256 };
-const vArg = (kind, x) => (kind === 'r' ? `r${x}` : kind === 'g' ? SHLIST[x] : kind === 'N' ? `${x}` : kind === 'v' ? `v${x}` : kind === 's' ? `s${x}` : kind === 'vs' ? (x < 4 ? `v${x}` : `s${x - 4}`) : kind === 'k' ? `→ ${x}` : `${x}`);
+const parseSol = (t) => (isVk(t) ? parseVk(t.sol) : isDrv(t) ? parseDrv(t.sol) : isVec(t) ? parseVec(t.sol) : parseProg(t.sol));
+const VRANGE = { v: 4, s: 4, vs: 8, n: 16, k: 16, r: 4, g: 3, N: 256, b: 4, m: 4, d: 2, p: 2, K: 2 };
+const vArg = (kind, x) => ('bmdp'.includes(kind) && kind.length === 1 ? `${kind}${x}` : kind === 'K' ? VKKERNELS[x].name : kind === 'r' ? `r${x}` : kind === 'g' ? SHLIST[x] : kind === 'N' ? `${x}` : kind === 'v' ? `v${x}` : kind === 's' ? `s${x}` : kind === 'vs' ? (x < 4 ? `v${x}` : `s${x - 4}`) : kind === 'k' ? `→ ${x}` : `${x}`);
 const vLine = (l, I = VISA) => I[l.op].args.map((k, i) => vArg(k, l.a[i])).join(', ');
 const lanesOf = (mask) => { const on = []; for (let l = 0; l < LANES; l++) if ((mask >> l) & 1) on.push(l); return on.length === LANES ? '전부' : on.length ? on.join('·') : '없음'; };
 const vRegsTxt = (o) => [
@@ -482,7 +483,9 @@ function renderAsm() {
   }
   h += `<div class="tools"><button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button><button data-a="reset" ${prog.length ? '' : 'disabled'}>처음부터</button></div>`;
   h += `<div class="palette${vec ? ' vpal' : ''}">${t.asm.ops.map((o) => `<button data-a="aop" data-op="${o}" ${prog.length >= 16 ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
-  h += isDrv(t)
+  h += isVk(t)
+    ? `<details class="isa"><summary>Vulkan 호출</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VKISA[o].args.join(', ')}</dt><dd>${VKISA[o].desc}</dd>`).join('')}</dl><p class="ttnote">b = 버퍼 b0~b3 · m = 메모리 m0~m3 · d = 디스크립터 세트 d0·d1 · p = 파이프라인 p0·p1 · K = 셰이더 · n = 수 0~15 · N = 수 0~255</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VK_NOTE}</p><p class="ttnote">${DRV_NOTE}</p><p class="ttnote">${PM4_NOTE}</p></details>`
+    : isDrv(t)
     ? `<details class="isa"><summary>드라이버 함수</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${DISA[o].args.join(', ')}</dt><dd>${DISA[o].desc}${DISA[o].real ? ` <small>실제: ${DISA[o].real}</small>` : ''}</dd>`).join('')}</dl><p class="ttnote">r = 드라이버 변수 r0~r3(버퍼 손잡이) · n = 수 0~15 · N = 수 0~255(칸을 눌러 직접 넣어도 돼요) · g = 레지스터 이름</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${DRV_NOTE}</p><p class="ttnote">${PM4_NOTE}</p></details>`
     : vec
     ? `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VISA[o].args.join(', ')}</dt><dd>${VISA[o].desc} <small>실제: ${VISA[o].real}</small></dd>`).join('')}</dl><p class="ttnote">v = v0~v3(레인마다) · s = s0~s3(웨이브에 하나) · vs = 둘 중 아무거나 · n = 수 · k = 줄 번호</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VEC_NOTE}${isCu(t) ? `</p><p class="ttnote">${CU_NOTE}` : ''}${t.asm.sched ? `</p><p class="ttnote">${SCHED_NOTE}` : ''}</p></details>`
@@ -493,7 +496,20 @@ function renderAsm() {
   h += '<div class="mach">';
   if (t.asm.tests.length > 1) h += `<div class="chips">${t.asm.tests.map((_, k) => `<button data-a="atest" data-t="${k}" class="chip${k === cur.tsel ? ' on' : ''}">입력 ${k + 1}</button>`).join('')}</div>`;
   const state = m.halted ? `멈춤 · ${m.steps}걸음` : m.steps >= 2000 ? '안 멈춰요' : m.steps ? `${m.steps}걸음` : '처음';
-  if (isDrv(t)) {
+  if (isVk(t)) {
+    const dv = m.drv;
+    h += `<div class="regs"><span>${m.halted ? (m.err ? '멈춤(잘못)' : '끝') : m.steps ? `${m.pc}번 줄` : '처음'}</span><span>녹화 <b>${m.rec === 'rec' ? '중' : m.rec === 'done' ? '끝' : '–'}</b></span><span>제출 <b>${dv.submitted}</b></span><span>펜스 <b>${dv.fence}</b></span></div>`;
+    const objs = [
+      ...Object.entries(m.bufs).map(([i, b]) => `b${i}: ${b.n}칸${b.mem != null ? ` · m${b.mem}+${b.off} · 가상 ${b.va}` : ' · (기억 없음)'}${b.va != null ? ` · [${Array.from({ length: b.n }, (_, k) => bufRead(m, i, k)).join(',')}]` : ''}`),
+      ...Object.entries(m.mems).map(([i, mm]) => `m${i}: ${mm.n}칸 · 드라이버 r${mm.r} · 가상 ${mm.va}~${mm.va + mm.n - 1}`),
+      ...Object.entries(m.dsets).map(([i, d]) => `d${i}: 가상 ${d.va} · [${[0, 1, 2, 3].map((k) => vaRead(dv, d.va + k)).join(',')}]`),
+      ...Object.entries(m.pipes).map(([i, pp]) => `p${i}: ${VKKERNELS[pp.k].name} · 0x${pp.addr.toString(16)}`),
+    ];
+    h += `<p class="wavehd">물체</p><ul class="vkobj">${objs.map((o) => `<li>${o}</li>`).join('') || '<li class="none">(아직 없음)</li>'}</ul>`;
+    h += `<p class="wavehd">아래로 내려간 것</p><ol class="cplog low">${m.low.map((x) => `<li><b>${x.op}</b> → ${x.low.join(' · ') || '–'}</li>`).join('')}${m.err ? `<li class="bad">${m.err}</li>` : ''}${!m.low.length && !m.err ? '<li class="none">「한 줄」을 눌러 보세요</li>' : ''}</ol>`;
+    if (dv.ib.length) h += `<p class="wavehd">IB(녹화 중)</p><p class="ttnote mono">${dv.ib.map(hex8).join(' ')}</p>`;
+    if (dv.log.some((l) => /DISPATCH|EVENT|ACQUIRE|펜스/.test(l))) h += `<p class="wavehd">GPU(CP)가 한 것</p><ol class="cplog">${dv.log.filter((l) => /DISPATCH|EVENT|ACQUIRE|SET_SH|INDIRECT|펜스/.test(l)).map((l) => `<li>${l}</li>`).join('')}</ol>`;
+  } else if (isDrv(t)) {
     h += `<div class="regs"><span>${m.halted ? (m.err ? '멈춤(잘못)' : '끝') : m.steps ? `${m.pc}번 줄` : '처음'}</span><span>제출 <b>${m.submitted}</b></span><span>펜스 <b>${m.fence}</b></span><span>IB <b>${m.ib.length}</b> dword</span></div>`;
     h += `<p class="wavehd">드라이버 변수 · ${m.r.map((hd, k) => `r${k}=${hd ? `버퍼 ${hd}` : '–'}`).join(' ')}</p>`;
     h += '<p class="wavehd">물리 기억(쪽 4칸씩)</p><div class="pages">' + Array.from({ length: PAGES }, (_, p) => {
@@ -545,7 +561,12 @@ function renderAsm() {
   t.asm.tests.forEach((x, k) => {
     const r = machRun(t, prog, k), ok = prog.length && machOk(t, x, r);
     let inTxt, wTxt, got;
-    if (isDrv(t)) {
+    if (isVk(t)) {
+      const w = x.want || {};
+      inTxt = x.data ? Object.entries(x.data).map(([bi, arr]) => `b${bi}=[${arr.join(',')}]`).join(' ') : '기본';
+      wTxt = [Object.entries(w.buf || {}).map(([bi, arr]) => `b${bi}=[${arr.join(',')}]`).join(' '), Object.entries(w.desc || {}).map(([di, sl]) => `d${di}=[${sl.map((b) => 'b' + b).join(',')}의 주소]`).join(' '), w.fence != null ? `펜스 ${w.fence}` : ''].filter(Boolean).join(' · ');
+      got = r.err ? r.err.slice(0, 40) : [Object.entries(w.buf || {}).map(([bi, arr]) => `b${bi}=[${arr.map((_, k) => bufRead(r, bi, k) ?? '–').join(',')}]`).join(' '), Object.keys(w.desc || {}).map((di) => { const d = r.dsets[di]; return `d${di}=[${d ? [0, 1, 2].map((k) => vaRead(r.drv, d.va + k)).join(',') : '없음'}]`; }).join(' '), w.fence != null ? `펜스 ${r.drv.fence}` : ''].filter(Boolean).join(' · ');
+    } else if (isDrv(t)) {
       const w = x.want || {};
       inTxt = x.data ? Object.entries(x.data).map(([ri, arr]) => `r${ri}=[${arr.join(',')}]`).join(' ') : '기본';
       wTxt = [Object.entries(w.va || {}).map(([va, val]) => `가상[${va}]=${val}`).join(' '), Object.entries(w.bo || {}).map(([ri, arr]) => `r${ri}=[${arr.join(',')}]`).join(' '), w.fence != null ? `펜스 ${w.fence}` : ''].filter(Boolean).join(' · ');
@@ -569,7 +590,8 @@ function renderAsm() {
   });
   h += '</tbody></table>';
   if (!vec && t.asm.ram) h += `<p class="ttnote">늘 들어 있는 칸: ${ramTxt(t.asm.ram)} · 나머지 빈 칸은 0</p>`;
-  if (isDrv(t)) h += `<p class="ttnote">한 줄 = 드라이버 함수 하나 · GPU 일은 SUBMIT 뒤 WAIT_FENCE(또는 끝)에서 돌아요</p>`;
+  if (isVk(t)) h += `<p class="ttnote">한 줄 = Vulkan 호출 하나 · 「한 줄」로 하나씩 내려가는 걸 볼 수 있어요 · 결과는 vkWaitForFences 뒤에만 보여요</p>`;
+  else if (isDrv(t)) h += `<p class="ttnote">한 줄 = 드라이버 함수 하나 · GPU 일은 SUBMIT 뒤 WAIT_FENCE(또는 끝)에서 돌아요</p>`;
   else if (isCu(t)) h += `<p class="ttnote">처음엔 v0 = ${(t.asm.wgs || 1) > 1 ? '워크그룹 안 작업 번호' : '작업 번호'}${(t.asm.waves || 1) > 1 ? `(웨이브 ${t.asm.waves}: 0~${t.asm.waves * 4 - 1})` : ''}${t.asm.wgReg != null ? ` · s${t.asm.wgReg} = 워크그룹 번호` : ''}, 적지 않은 칸·레지스터는 0 · 한 줄 = 한 사이클 · 굵은 테두리 칸이 답을 볼 칸</p>`;
   else if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();

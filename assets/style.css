@@ -198,3 +198,9 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .raedit { margin: 10px 0; display: grid; gap: 6px; }
 .rarow { display: flex; align-items: center; gap: 6px; }
 .rarow > span { min-width: 34px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* 10부 Vulkan */
+.vkobj { margin: 4px 0 8px; padding-left: 18px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.vkobj li.none { color: var(--mute); list-style: none; margin-left: -18px; }
+.cplog.low li b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.vpal button[data-op^="vk"] { font-size: 11px; }

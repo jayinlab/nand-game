@@ -312,6 +312,7 @@ export const PM4_OPS = {
   RELEASE_MEM: { code: 0x49, body: '주소, 값 (단순화)', desc: '이 큐에서 앞서 낸 일이 끝나면 기억[주소]에 값을 써요(펜스) — 실제로는 이벤트·캐시 동작을 맞춰 골라요' },
   WAIT_REG_MEM: { code: 0x3c, body: '함수(3 = 같음), 주소, 기준값, 마스크 (단순화)', desc: '기억[주소] AND 마스크가 기준값과 같아질 때까지 기다려요' },
   ACQUIRE_MEM: { code: 0x58, body: '1 (단순화)', desc: '게임의 GPU 읽기 캐시에 남은 옛값을 버려요 — 실제로는 대상 캐시·범위·동작을 지정해요' },
+  EVENT_WRITE: { code: 0x46, body: 'EVENT_TYPE | EVENT_INDEX<<8 (CS_PARTIAL_FLUSH = 7, 인덱스 4 → 0x407)', desc: 'CS_PARTIAL_FLUSH면 앞서 낸 컴퓨트 일이 끝날 때까지 기다려요' },
   INDIRECT_BUFFER: { code: 0x3f, body: '주소 아래, 주소 위, 크기(dword)', desc: '기억에 있는 다른 명령 묶음(IB)을 읽어 실행해요' },
 };
 export const SH_REGS = {
@@ -319,7 +320,7 @@ export const SH_REGS = {
   COMPUTE_PGM_LO: 0xb830, COMPUTE_USER_DATA_0: 0xb900, COMPUTE_USER_DATA_1: 0xb904,
 };
 export const SH_BASE = 0xb000;
-export const PM4_NOTE = '8부는 CP와 PM4를 단순화했어요. 헤더 모양(3<<30 | count<<16 | 명령<<8), 명령 번호, SET_SH_REG의 레지스터 자리((주소 − 0xB000) ÷ 4), 레지스터 주소, DISPATCH_DIRECT 본문(DIM_X·Y·Z·INITIATOR, COMPUTE_SHADER_EN = INITIATOR 0번 자리)은 실제(Mesa sid.h)와 같아요. 게임은 헤더 아래 비트(predicate·shader type 등)를 0으로 둬요 — 실제 RADV의 DISPATCH_DIRECT 헤더는 compute 표시까지 넣어 0xC0031502예요. RELEASE_MEM·WAIT_REG_MEM·ACQUIRE_MEM은 본문을 줄였고(실제는 이벤트 종류·캐시 동작·64비트 주소·데이터 선택 등 dword가 더 많아요), INDIRECT_BUFFER의 셋째 dword엔 크기만 넣어요(실제 크기는 bits 19:0이고, compute 링에선 VALID 같은 자리도 써요). 게임은 COMPUTE_PGM_HI와 COMPUTE_PGM_RSRC1·2 같은 나머지 실행 상태를 미리 준비해 둬요 — 실제 PGM_LO엔 「주소 >> 8」의 아래 32비트를, 더 높은 비트는 PGM_HI에 넣어요. 게임은 USER_DATA_0을 s0으로 넘기도록 설정해 두고, 워크그룹 번호를 s3으로 받는 커널은 user SGPR 3개에 TGID_X_EN을 켠 상태를 가정해요. 값은 게임 기억에 맞춰 작고(8비트), GPU 주소 0x1800·0x2400의 커널 창고와 기억 32칸은 지어낸 자리예요. 워크그룹은 X 방향 1~8개, 크기는 X 4·8·12·16(Y·Z는 1)만 돼요. 게임의 CP는 패킷을 하나씩 끝내고 다음으로 가요(디스패치가 다 끝나야 다음 패킷) — 실제 CP는 기다리지 않아서 디스패치끼리 겹칠 수 있고, 그래서 펜스·대기·캐시 패킷이 필요해요. rptr이 앞으로 갔다고 커널 실행까지 끝난 건 아니에요. 게임은 CPU 쪽 제출을 한데 묶었어요 — 보통의 RADV/amdgpu 경로에선 사용자 모드 드라이버가 IB를 만들고 커널 드라이버가 링에 제출해요. 실제로는 패킷 쓰기가 GPU에 보이도록 순서를 보장한 뒤 wptr을 알리고, 경로에 따라 도어벨 대신 wptr 레지스터를 갱신하기도 해요. wptr·rptr은 링 안 dword 자리(0부터, 링 크기로 감김)로 셌어요.';
+export const PM4_NOTE = '8부는 CP와 PM4를 단순화했어요. 헤더 모양(3<<30 | count<<16 | 명령<<8), 명령 번호, SET_SH_REG의 레지스터 자리((주소 − 0xB000) ÷ 4), 레지스터 주소, DISPATCH_DIRECT 본문(DIM_X·Y·Z·INITIATOR, COMPUTE_SHADER_EN = INITIATOR 0번 자리)은 실제(Mesa sid.h)와 같아요. 게임은 헤더 아래 비트(predicate·shader type 등)를 0으로 둬요 — 실제 RADV의 DISPATCH_DIRECT 헤더는 compute 표시까지 넣어 0xC0031502예요. RELEASE_MEM·WAIT_REG_MEM·ACQUIRE_MEM은 본문을 줄였고(실제는 이벤트 종류·캐시 동작·64비트 주소·데이터 선택 등 dword가 더 많아요), INDIRECT_BUFFER의 셋째 dword엔 크기만 넣어요(실제 크기는 bits 19:0이고, compute 링에선 VALID 같은 자리도 써요). 게임은 COMPUTE_PGM_HI와 COMPUTE_PGM_RSRC1·2 같은 나머지 실행 상태를 미리 준비해 둬요 — 실제 PGM_LO엔 「주소 >> 8」의 아래 32비트를, 더 높은 비트는 PGM_HI에 넣어요. 게임은 USER_DATA_0을 s0으로 넘기도록 설정해 두고, 워크그룹 번호를 s3으로 받는 커널은 user SGPR 3개에 TGID_X_EN을 켠 상태를 가정해요. 값은 게임 기억에 맞춰 작고(8비트), GPU 주소 0x1800·0x2400의 커널 창고와 기억 32칸은 지어낸 자리예요. 워크그룹은 X 방향 1~8개, 크기는 X 4·8·12·16(Y·Z는 1)만 돼요. 게임의 CP는 패킷을 하나씩 처리하지만, 디스패치 둘이 연달아 오면 둘째는 첫째 결과를 못 보고 겹쳐 돌아요 — 게임은 사이에 EVENT_WRITE CS_PARTIAL_FLUSH나 RELEASE_MEM이 있으면 앞 디스패치가 끝나길 기다리도록 단순화했어요. 실제 CP도 디스패치를 겹쳐 돌릴 수 있지만 꼭 겹치거나 꼭 옛값을 읽는 건 아니고, 실제 RELEASE_MEM은 그것만으로 다음 디스패치를 멈추지 않아요(펜스 기록에 대한 WAIT_REG_MEM 같은 별도 대기가 필요해요). CS_PARTIAL_FLUSH의 실행 대기도 캐시 가시성까지 다 보장하진 않아서, 결과를 읽으려면 캐시 처리도 맞춰야 해요. rptr이 앞으로 갔다고 커널 실행까지 끝난 건 아니에요. 게임은 CPU 쪽 제출을 한데 묶었어요 — 보통의 RADV/amdgpu 경로에선 사용자 모드 드라이버가 IB를 만들고 커널 드라이버가 링에 제출해요. 실제로는 패킷 쓰기가 GPU에 보이도록 순서를 보장한 뒤 wptr을 알리고, 경로에 따라 도어벨 대신 wptr 레지스터를 갱신하기도 해요. wptr·rptr은 링 안 dword 자리(0부터, 링 크기로 감김)로 셌어요.';
 export const pm4Hdr = (op, count) => ((3 << 30) | ((count & 0x3fff) << 16) | ((PM4_OPS[op].code & 0xff) << 8)) >>> 0;
 export const regOff = (name) => (SH_REGS[name] - SH_BASE) >> 2;
 export const hex8 = (n) => '0x' + (n >>> 0).toString(16).toUpperCase().padStart(8, '0');
@@ -340,6 +341,7 @@ export function parsePm4(t) {
 // 커널 창고: GPU 주소 → 7부 커널(정답 프로그램)
 export const KERNELS = {
   0x1800: { name: '두 배 커널(7-2)', sol: 'S_MULI s1, s3, 4; V_ADD v1, s1, v0; G_LOAD v2, v1; V_ADD v1, s0, v1; S_WAITCNT; V_ADD v2, v2, v2; G_STORE v1, v2; S_ENDPGM', args: 'USER_DATA_0 = 쓸 배열 시작' },
+  0x2800: { name: '두 배 커널(디스크립터)', sol: 'S_MULI s1, s3, 4; V_ADD v0, s1, v0; S_LOADS s1, s0, 0; S_LOADS s2, s0, 1; S_WAITCNT; V_ADD v1, s1, v0; G_LOAD v1, v1; V_ADD v2, s2, v0; S_WAITCNT; V_ADD v1, v1, v1; G_STORE v2, v1; S_ENDPGM', args: 'USER_DATA_0 = 디스크립터(입력·출력 주소)' },
   0x2400: { name: '벡터 더하기 커널(7-5)', sol: 'S_MULI s1, s3, 4; V_ADD v0, s1, v0; S_LOADS s1, s0, 0; S_LOADS s2, s0, 1; S_LOADS s3, s0, 2; S_WAITCNT; V_ADD v1, s1, v0; G_LOAD v1, v1; V_ADD v2, s2, v0; G_LOAD v2, v2; V_ADD v3, s3, v0; S_WAITCNT; V_ADD v1, v1, v2; G_STORE v3, v1; S_ENDPGM', args: 'USER_DATA_0 = 커널 인자 주소(a·b·c 시작)' },
 };
 const OPNAME = Object.fromEntries(Object.entries(PM4_OPS).map(([k, v]) => [v.code, k]));
@@ -354,6 +356,7 @@ export function pm4Run(P, dwords, db, x = {}) {
   const sh = { ...(P.sh || {}) };
   const log = [];
   let stale = { ...(x.stale || {}) }, tick = 0, err = null;
+  let before = null; // 앞 디스패치가 아직 끝났다고 확인 안 됐으면, 그 디스패치 전의 기억(겹쳐 도는 다음 디스패치가 보는 것)
   const env = (x.env || []).map((e) => ({ ...e })); // 스테이지 자료는 건드리지 않게 복사
   const pass = () => { tick++; for (const e of env) if (!e.done && tick >= e.tick) { e.done = true; for (const [k, v] of Object.entries(e.mem)) mem[k] = v; } };
   function exec(read, where) {
@@ -384,12 +387,14 @@ export function pm4Run(P, dwords, db, x = {}) {
         if (!tx || tx % 4 || tx > 16 || ty !== 1 || tz !== 1) { err = `워크그룹 크기 ${tx}×${ty}×${tz} — 이 게임은 X가 4·8·12·16이고 Y·Z는 1이어야 해요.`; break; }
         const G = X * Y * Z;
         if (!G || G > 8) { err = `워크그룹 ${X}×${Y}×${Z} = ${G}개 — 이 게임은 1~8개예요.`; break; }
-        const view = mem.slice(); for (const [k, v] of Object.entries(stale)) view[k] = v; // 캐시에 남은 옛값
+        const view = (before || mem).slice(); for (const [k, v] of Object.entries(stale)) view[k] = v; // 캐시에 남은 옛값
+        const overlap = !!before;
+        if (!before) before = mem.slice();
         const m = cuRun(parseVec(K.sol), { cu: true, vec: true, vm: P.vm, waves: tx / 4, wgs: G, cus: 2, wgReg: 3, s: { 0: sh[SH_REGS.COMPUTE_USER_DATA_0] || 0, 1: sh[SH_REGS.COMPUTE_USER_DATA_1] || 0 } }, { mem: Object.fromEntries(view.map((v, k) => [k, v])) });
         m.mem.forEach((v, k) => { if (v !== view[k]) { mem[k] = v; delete stale[k]; } });
-        log.push(`DISPATCH_DIRECT — ${K.name}, 워크그룹 ${G}개 × ${tx}작업, ${m.t}사이클${m.err === 'loop' ? ' (안 멈춤)' : ''}`);
+        log.push(`DISPATCH_DIRECT — ${K.name}, 워크그룹 ${G}개 × ${tx}작업, ${m.t}사이클${m.err === 'loop' ? ' (안 멈춤)' : ''}${overlap ? ' — 앞 디스패치와 겹쳐 돌아서 앞 결과를 못 봤어요' : ''}`);
         if (m.err && m.err !== 'loop') { err = `커널: ${m.err}`; break; }
-      } else if (op === 'RELEASE_MEM') { mem[body[0] % MEMN] = body[1] & 255; log.push(`RELEASE_MEM — 앞의 일이 끝나서 기억[${body[0]}] ← ${body[1]}`); }
+      } else if (op === 'RELEASE_MEM') { before = null; mem[body[0] % MEMN] = body[1] & 255; log.push(`RELEASE_MEM — 앞의 일이 끝나서 기억[${body[0]}] ← ${body[1]}`); }
       else if (op === 'WAIT_REG_MEM') {
         const [fn, a, ref, mask] = body;
         if (fn !== 3) { err = `WAIT_REG_MEM 함수 ${fn} — 이 게임은 3(같음)만 알아요.`; break; }
@@ -398,6 +403,7 @@ export function pm4Run(P, dwords, db, x = {}) {
         if (n >= 50) { err = `WAIT_REG_MEM — 기억[${a}]이 끝내 ${ref}가 안 돼서 CP가 멈춰 있어요.`; break; }
         log.push(`WAIT_REG_MEM — 기억[${a}] = ${ref} 될 때까지 ${n}틱 기다림`);
       } else if (op === 'ACQUIRE_MEM') { stale = {}; log.push('ACQUIRE_MEM — GPU 캐시의 옛값을 버림'); }
+      else if (op === 'EVENT_WRITE') { if ((body[0] & 0x3f) === 7) { before = null; log.push('EVENT_WRITE CS_PARTIAL_FLUSH — 앞 컴퓨트 일이 끝날 때까지 기다림'); } else log.push(`EVENT_WRITE — 이벤트 ${body[0]}(게임은 7만 알아요)`); }
       else if (op === 'INDIRECT_BUFFER') {
         const [lo, hi, size] = body, ib = (P.ibs || {})[lo];
         if (where !== '링') { err = 'IB 안의 IB는 이 게임에선 안 돼요.'; break; }
@@ -561,6 +567,133 @@ export function raLive(prog, temps) {
   });
   return { lines, def, last, live: lines.map((_, k) => temps.filter((t) => def[t] != null && k >= def[t] && k <= (last[t] ?? def[t]))) };
 }
+
+// ---------- 10부: Vulkan ----------
+// Vulkan 호출 하나가 아래로 무엇이 되는지(9부 드라이버 함수 · 8부 PM4)를 남기며 돈다. 물체는 번호로: b0~b3 버퍼, m0~m3 메모리, d0·d1 디스크립터 세트, p0·p1 파이프라인.
+export const VK_NOTE = '10부는 Vulkan을 아주 줄였어요. 물체는 번호(b0·m0·d0·p0)로 부르고, 함수 인자는 크기·자리 몇 개만 남겼어요 — 실제로는 생성 정보 구조체, 디스크립터 세트 레이아웃·풀, 파이프라인 레이아웃, 커맨드 풀·버퍼, 큐가 다 따로 있어요. 게임은 메모리 요구 크기·정렬·호환 메모리 타입 검사를 생략해요 — 실제 앱은 vkGetBufferMemoryRequirements(크기·정렬·memoryTypeBits)와 vkGetPhysicalDeviceMemoryProperties로 조건을 확인하고 메모리 타입과 바인딩 자리(정렬을 지켜야 해요)를 골라요. 아래로 내려가는 모양은 RADV를 본떴지만 훨씬 짧아요: vkAllocateMemory가 BO를 만들고 GPU 가상 주소를 붙이는 것, 버퍼 주소 = 기억 주소 + 앉힌 자리, 디스크립터 세트가 버퍼 주소를 적은 기억이고 그 주소가 user SGPR로 가는 것, 파이프라인이 셰이더 주소·작업 수 레지스터를 쓰는 것까지만 흉내 내요(실제 RADV의 스토리지 버퍼 디스크립터엔 크기 등도 있고, 세트 주소를 넘기는 방식도 설정에 따라 달라요). 게임은 bind·barrier 호출 자리에서 바로 패킷을 써요 — 실제 RADV는 상태 변경과 필요한 동기화를 모아 디스패치 직전 등에 쓰므로 호출 하나와 패킷 하나가 그대로 짝지어지진 않아요. 게임의 vkCmdPipelineBarrier는 COMPUTE_SHADER → COMPUTE_SHADER 단계와 SHADER_WRITE → SHADER_READ 접근을 지정한 메모리 배리어 하나를 흉내 내고, EVENT_WRITE(CS_PARTIAL_FLUSH)와 ACQUIRE_MEM으로 내려가요 — 실제 패킷 고르기는 단계·접근 마스크, GPU 세대, 큐 종류에 따라 달라요. vkQueueSubmit은 9부 SUBMIT으로 이어 붙였어요 — 실제 RADV는 자체 큐·winsys 경로에서 IB와 동기화 정보(DRM syncobj 등)를 꾸려 DRM_AMDGPU_CS로 제출해요. 게임은 CPU가 매핑할 수 있는 일관(coherent) 메모리와 필요한 CPU↔GPU 가시성 처리를 가정해요 — vkMapMemory엔 HOST_VISIBLE 메모리가 필요하고, 비일관 메모리는 flush/invalidate가 필요해요. 실제로 CPU가 결과를 읽으려면 셰이더 쓰기 → HOST_READ 메모리 의존성과 완료 확인이 필요해요. 게임의 vkWaitForFences는 무한 대기 뒤 성공한 경우만 다뤄요. 커맨드 버퍼는 하나, 큐도 하나, 펜스도 하나예요.';
+export const VKKERNELS = [{ name: '벡터 더하기', addr: 0x2400 }, { name: '두 배', addr: 0x2800 }];
+export const VKISA = {
+  vkCreateBuffer: { args: ['b', 'n'], real: 'vkCreateBuffer', desc: '버퍼 bD(n칸)를 만들어요 — 아직 기억은 없어요' },
+  vkAllocateMemory: { args: ['m', 'n'], real: 'vkAllocateMemory', desc: '기억 mD(n칸)를 받아요 — 드라이버가 BO를 만들고 GPU 가상 주소에 붙여요' },
+  vkBindBufferMemory: { args: ['b', 'm', 'n'], real: 'vkBindBufferMemory', desc: '버퍼를 기억의 n번 칸부터에 앉혀요' },
+  memcpy: { args: ['m', 'n', 'N'], real: 'vkMapMemory 뒤 memcpy', desc: '기억의 n번 칸에 N을 써요(CPU)' },
+  vkAllocateDescriptorSets: { args: ['d'], real: 'vkAllocateDescriptorSets', desc: '디스크립터 세트 dD를 받아요(드라이버가 기억을 잡아요)' },
+  vkUpdateDescriptorSets: { args: ['d', 'n', 'b'], real: 'vkUpdateDescriptorSets', desc: '세트의 n번 자리에 버퍼를 적어요 — 그 버퍼의 GPU 주소가 써져요' },
+  vkCreateComputePipelines: { args: ['p', 'K'], real: 'vkCreateComputePipelines', desc: '셰이더로 파이프라인 pD를 만들어요(드라이버가 ISA로 컴파일해 올려요)' },
+  vkBeginCommandBuffer: { args: [], real: 'vkBeginCommandBuffer', desc: '명령 녹화 시작 — IB를 비워요' },
+  vkCmdBindPipeline: { args: ['p'], real: 'vkCmdBindPipeline', desc: '파이프라인을 묶어요 — PGM_LO·NUM_THREAD_X를 IB에' },
+  vkCmdBindDescriptorSets: { args: ['d'], real: 'vkCmdBindDescriptorSets', desc: '세트를 묶어요 — 세트 주소를 USER_DATA_0으로' },
+  vkCmdDispatch: { args: ['n'], real: 'vkCmdDispatch', desc: '워크그룹 n개 — DISPATCH_DIRECT를 IB에' },
+  vkCmdPipelineBarrier: { args: [], real: 'vkCmdPipelineBarrier (COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ)', desc: '앞 디스패치가 끝나고 쓴 값이 보여야 다음으로 — 게임은 EVENT_WRITE(CS_PARTIAL_FLUSH)와 ACQUIRE_MEM을 IB에' },
+  vkEndCommandBuffer: { args: [], real: 'vkEndCommandBuffer', desc: '녹화 끝' },
+  vkQueueSubmit: { args: [], real: 'vkQueueSubmit (펜스 하나와)', desc: '녹화한 커맨드 버퍼를 큐에 넣어요 — 게임은 9부 SUBMIT으로(실제 RADV는 자체 경로로 DRM_AMDGPU_CS)' },
+  vkWaitForFences: { args: [], real: 'vkWaitForFences', desc: '펜스가 올라올 때까지 CPU가 기다려요 — 드라이버 WAIT_FENCE' },
+  END: { args: [], real: '', desc: '끝 — 게임에선 펜스를 기다리지 않은 결과는 못 읽어요' },
+};
+export function vkInit(V, x = {}) {
+  const drv = drvInit({}, {});
+  drv.r = Array(16).fill(null);
+  const m = { drv, bufs: {}, mems: {}, dsets: {}, pipes: {}, rec: null, nextR: 0, nextVa: 0, low: [], pc: 0, steps: 0, halted: false, err: null, last: [] };
+  const D = (line) => { const pc = drv.pc; drv.pc = 0; drv.halted = false; drvStep({}, [line], drv); drv.pc = pc; if (drv.err) { m.err = drv.err; m.halted = true; } };
+  m.D = D;
+  for (const b of (V.pre && V.pre.bufs) || []) { // 미리 있는 버퍼(제 기억 하나씩)
+    vkExec(V, m, { op: 'vkCreateBuffer', a: [b.id, b.size] }, true);
+    vkExec(V, m, { op: 'vkAllocateMemory', a: [b.id, b.size] }, true);
+    vkExec(V, m, { op: 'vkBindBufferMemory', a: [b.id, b.id, 0] }, true);
+    const data = (x.data && x.data[b.id]) || b.data || [];
+    data.forEach((v, i) => vkExec(V, m, { op: 'memcpy', a: [b.id, i, v] }, true));
+  }
+  for (const d of (V.pre && V.pre.dsets) || []) {
+    vkExec(V, m, { op: 'vkAllocateDescriptorSets', a: [d.id] }, true);
+    d.slots.forEach((bi, i) => vkExec(V, m, { op: 'vkUpdateDescriptorSets', a: [d.id, i, bi] }, true));
+  }
+  for (const p of (V.pre && V.pre.pipes) || []) vkExec(V, m, { op: 'vkCreateComputePipelines', a: [p.id, p.k] }, true);
+  m.low = []; m.last = [];
+  return m;
+}
+const allocVa = (m, n) => { const va = m.nextVa; m.nextVa += Math.ceil(n / 4) * 4; return va; };
+function vkExec(V, m, l, pre) {
+  const { op, a } = l, drv = m.drv, low = [];
+  const fail = (t) => { m.err = `${pre ? '준비' : m.pc + '번 줄'} ${op}: ${t}`; m.halted = true; };
+  const newR = () => m.nextR++;
+  const need = (kind, i) => { const o = m[kind][a[i]]; if (!o) fail(`${{ bufs: 'b', mems: 'm', dsets: 'd', pipes: 'p' }[kind]}${a[i]}이 아직 없어요.`); return o; };
+  const emit = (line) => { low.push(line); m.D(parseDrv(line)[0]); };
+  const recOnly = () => { if (m.rec !== 'rec') { fail('녹화 중이 아니에요(vkBeginCommandBuffer 먼저).'); return false; } return true; };
+  if (op === 'vkCreateBuffer') { m.bufs[a[0]] = { n: a[1], mem: null, off: 0 }; low.push('(아래로 가는 건 없음 — 크기만 적어 둬요)'); }
+  else if (op === 'vkAllocateMemory') {
+    const r = newR(), va = allocVa(m, a[1]);
+    m.mems[a[0]] = { n: Math.ceil(a[1] / 4) * 4, r, va };
+    emit(`BO_ALLOC r${r}, ${a[1]}`); if (m.err) return; emit(`VA_MAP r${r}, ${va}`);
+  } else if (op === 'vkBindBufferMemory') {
+    const b = need('bufs', 0), mm = need('mems', 1); if (!b || !mm) return;
+    if (a[2] + b.n > mm.n) return fail(`버퍼(${b.n}칸)가 기억(${mm.n}칸)의 ${a[2]}번부터 안 들어가요.`);
+    b.mem = a[1]; b.off = a[2]; b.va = mm.va + a[2];
+    low.push(`(버퍼 주소 = 기억 주소 ${mm.va} + ${a[2]} = 가상 ${b.va})`);
+  } else if (op === 'memcpy') {
+    const mm = need('mems', 0); if (!mm) return;
+    emit(`CPU_WRITE r${mm.r}, ${a[1]}, ${a[2]}`);
+  } else if (op === 'vkAllocateDescriptorSets') {
+    const r = newR(), va = allocVa(m, 4);
+    m.dsets[a[0]] = { r, va };
+    emit(`BO_ALLOC r${r}, 4`); if (m.err) return; emit(`VA_MAP r${r}, ${va}`);
+  } else if (op === 'vkUpdateDescriptorSets') {
+    const d = need('dsets', 0), b = need('bufs', 2); if (!d || !b) return;
+    if (b.va == null) return fail(`b${a[2]}가 아직 기억에 안 앉았어요(vkBindBufferMemory).`);
+    emit(`CPU_WRITE r${d.r}, ${a[1]}, ${b.va}`);
+  } else if (op === 'vkCreateComputePipelines') {
+    const k = VKKERNELS[a[1]]; m.pipes[a[0]] = { k: a[1], addr: k.addr };
+    low.push(`(셰이더를 ISA로 컴파일해 GPU 주소 0x${k.addr.toString(16)}에 올렸다고 쳐요)`);
+  } else if (op === 'vkBeginCommandBuffer') { drv.ib = []; m.rec = 'rec'; low.push('(IB 비우기)'); }
+  else if (op === 'vkCmdBindPipeline') {
+    if (!recOnly()) return; const p = need('pipes', 0); if (!p) return;
+    m.bound = p;
+    emit(`EMIT_SET_SH COMPUTE_PGM_LO, ${p.addr >> 8}`); emit('EMIT_SET_SH COMPUTE_NUM_THREAD_X, 4');
+  } else if (op === 'vkCmdBindDescriptorSets') {
+    if (!recOnly()) return; const d = need('dsets', 0); if (!d) return;
+    emit(`EMIT_SET_SH COMPUTE_USER_DATA_0, ${d.va}`);
+  } else if (op === 'vkCmdDispatch') {
+    if (!recOnly()) return; if (!m.bound) return fail('파이프라인을 아직 안 묶었어요.');
+    emit(`EMIT_DISPATCH ${a[0]}`);
+  } else if (op === 'vkCmdPipelineBarrier') {
+    if (!recOnly()) return;
+    drv.ib.push(pm4Hdr('EVENT_WRITE', 0), 0x407, pm4Hdr('ACQUIRE_MEM', 0), 1); // EVENT_TYPE(CS_PARTIAL_FLUSH = 7) | EVENT_INDEX(4)
+    low.push('IB에 EVENT_WRITE(CS_PARTIAL_FLUSH) · ACQUIRE_MEM');
+  } else if (op === 'vkEndCommandBuffer') { if (!recOnly()) return; m.rec = 'done'; low.push(`(IB ${drv.ib.length} dword 녹화 끝)`); }
+  else if (op === 'vkQueueSubmit') {
+    if (m.rec !== 'done') return fail('녹화를 끝낸 커맨드 버퍼가 없어요(vkEndCommandBuffer 먼저).');
+    emit('SUBMIT'); m.rec = null;
+  } else if (op === 'vkWaitForFences') { emit('WAIT_FENCE'); }
+  else if (op === 'END') { low.push('(끝 — 게임에선 기다리지 않은 GPU 일의 결과를 CPU가 못 봐요)'); m.halted = true; }
+  if (!pre) { m.low.push({ pc: m.pc, op, low }); m.last = low; }
+}
+export function vkStep(V, prog, m) {
+  if (m.halted) return m;
+  if (m.pc >= prog.length) { vkExec(V, m, { op: 'END', a: [] }); m.halted = true; return m; }
+  vkExec(V, m, prog[m.pc]);
+  if (!m.err) { m.pc++; m.steps++; }
+  return m;
+}
+export function vkRun(V, prog, x) {
+  const m = vkInit(V, x);
+  while (!m.halted && m.steps < 100) vkStep(V, prog, m);
+  return m;
+}
+export const bufRead = (m, bi, k) => { const b = m.bufs[bi]; return b && b.va != null ? vaRead(m.drv, b.va + k) : null; };
+export function vkOk(x, m) {
+  if (m.err) return false;
+  const w = x.want || {};
+  for (const [bi, arr] of Object.entries(w.buf || {})) if (arr.some((v, k) => v != null && bufRead(m, bi, k) !== v)) return false;
+  for (const [di, slots] of Object.entries(w.desc || {})) {
+    const d = m.dsets[di]; if (!d) return false;
+    if (slots.some((bi, k) => { const b = m.bufs[bi]; return !b || b.va == null || vaRead(m.drv, d.va + k) !== b.va; })) return false;
+  }
+  if (w.fence != null && m.drv.fence !== w.fence) return false;
+  return true;
+}
+export const parseVk = (t) => t.split(';').map((x) => x.trim()).filter(Boolean).map((x) => {
+  const [op, ...rest] = x.split(/[\s,]+/).filter(Boolean);
+  return { op, a: VKISA[op].args.map((k, i) => { const r = rest[i]; if ('bmdp'.includes(k)) return +r.slice(1); if (k === 'K') return VKKERNELS.findIndex((q) => q.name === r.replace(/_/g, ' ')); return Number(r); }) };
+});
 
 export function vecInit(asm, x) {
   const v = Array.from({ length: 4 }, (_, r) => Array.from({ length: LANES }, (_, l) => (r === 0 ? l : 0))); // v0 = 레인 번호
@@ -1635,5 +1768,53 @@ export const STAGES = [
   {
     id: '9-11', book: 9, kind: '시험', title: '9부 시험', pool: ['9-4', '9-6', '9-8', '9-10'], rounds: 3,
     text: '9부의 드라이버 일 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 마지막 10부(Vulkan)로 가요.',
+  },
+  // ---------- 10부 Vulkan ----------
+  // 사실 근거: Vulkan 사양(Khronos), Mesa RADV(radv_device_memory.c·radv_descriptor_set.c·radv_cmd_buffer.c·radv_queue.c). 단순화는 VK_NOTE.
+  {
+    id: '10-1', book: 10, kind: '개념', title: '버퍼와 메모리',
+    text: '마지막, Vulkan이에요. Vulkan에선 「버퍼」(무엇을 담을지)와 「메모리」(어디에 담을지)가 따로예요. 버퍼 b0(4칸)를 만들고, 메모리 m0(4칸)를 받아 앉히고, [5, 6, 7, 8]을 써요. 줄마다 아래로 무엇이 내려갔는지(9부 드라이버 함수) 보세요.',
+    hints: ['만들기 → 받기 → 앉히기 → memcpy 넷.', 'vkCreateBuffer b0, 4 · vkAllocateMemory m0, 4 · vkBindBufferMemory b0, m0, 0 · memcpy m0, 0, 5 · memcpy m0, 1, 6 · memcpy m0, 2, 7 · memcpy m0, 3, 8 · END.'],
+    asm: { vk: true, vec: true, ops: ['vkCreateBuffer', 'vkAllocateMemory', 'vkBindBufferMemory', 'memcpy', 'END'], v: {}, tests: [{ want: { buf: { 0: [5, 6, 7, 8] } } }] },
+    sol: 'vkCreateBuffer b0, 4; vkAllocateMemory m0, 4; vkBindBufferMemory b0, m0, 0; memcpy m0, 0, 5; memcpy m0, 1, 6; memcpy m0, 2, 7; memcpy m0, 3, 8; END', par: 8,
+  },
+  {
+    id: '10-2', book: 10, kind: '연습', title: '메모리 하나에 버퍼 둘',
+    text: '메모리를 버퍼마다 받지 않고, 큰 메모리 하나(8칸)를 받아 버퍼 둘을 나눠 앉히는 게 보통이에요(VkBindBufferMemory의 자리). b0은 0번 칸부터, b1은 4번 칸부터. b0[0] = 5, b1[0] = 9.',
+    hints: ['b1의 0번 칸 = 메모리의 4번 칸.', 'vkCreateBuffer b0, 4 · vkCreateBuffer b1, 4 · vkAllocateMemory m0, 8 · vkBindBufferMemory b0, m0, 0 · vkBindBufferMemory b1, m0, 4 · memcpy m0, 0, 5 · memcpy m0, 4, 9 · END.'],
+    asm: { vk: true, vec: true, ops: ['vkCreateBuffer', 'vkAllocateMemory', 'vkBindBufferMemory', 'memcpy', 'END'], v: {}, tests: [{ want: { buf: { 0: [5], 1: [9] } } }] },
+    sol: 'vkCreateBuffer b0, 4; vkCreateBuffer b1, 4; vkAllocateMemory m0, 8; vkBindBufferMemory b0, m0, 0; vkBindBufferMemory b1, m0, 4; memcpy m0, 0, 5; memcpy m0, 4, 9; END', par: 8,
+  },
+  {
+    id: '10-3', book: 10, kind: '개념', title: '디스크립터',
+    text: '셰이더는 버퍼를 어떻게 찾을까요? 디스크립터 세트에 「몇 번 자리 = 어느 버퍼」를 적어요. 게임의 드라이버는 세트를 작은 기억으로 만들고 자리마다 버퍼의 GPU 주소를 써요 — 7부 커널이 s0으로 받던 「인자 주소」가 바로 이 세트예요. a(b0)·b(b1)·c(b2)는 이미 있어요. 세트 d0을 받아 0·1·2번 자리에 b0·b1·b2를.',
+    hints: ['받고, 자리 셋 적기.', 'vkAllocateDescriptorSets d0 · vkUpdateDescriptorSets d0, 0, b0 · vkUpdateDescriptorSets d0, 1, b1 · vkUpdateDescriptorSets d0, 2, b2 · END.'],
+    asm: { vk: true, vec: true, ops: ['vkCreateBuffer', 'vkAllocateMemory', 'vkBindBufferMemory', 'memcpy', 'vkAllocateDescriptorSets', 'vkUpdateDescriptorSets', 'END'], v: { pre: { bufs: [{ id: 0, size: 4, data: [1, 2, 3, 4] }, { id: 1, size: 4, data: [10, 20, 30, 40] }, { id: 2, size: 4 }] } }, tests: [{ want: { desc: { 0: [0, 1, 2] } } }] },
+    sol: 'vkAllocateDescriptorSets d0; vkUpdateDescriptorSets d0, 0, b0; vkUpdateDescriptorSets d0, 1, b1; vkUpdateDescriptorSets d0, 2, b2; END', par: 5,
+  },
+  {
+    id: '10-4', book: 10, kind: '개념', title: '녹화하고 제출하기',
+    text: '버퍼와 세트 d0은 준비돼 있어요. 파이프라인 p0(벡터 더하기 셰이더)을 만들고, 커맨드 버퍼에 「파이프라인 묶기 → 세트 묶기 → 디스패치」를 녹화하고, 큐에 내고, 펜스를 기다려요. 녹화한 줄이 8부의 PM4 패킷으로 바뀌는 걸 보세요.',
+    hints: ['만들기 · 녹화 시작 · 묶기 둘 · 디스패치 1 · 녹화 끝 · 제출 · 기다리기.', 'vkCreateComputePipelines p0, 벡터_더하기 · vkBeginCommandBuffer · vkCmdBindPipeline p0 · vkCmdBindDescriptorSets d0 · vkCmdDispatch 1 · vkEndCommandBuffer · vkQueueSubmit · vkWaitForFences · END.'],
+    asm: { vk: true, vec: true, ops: ['vkCreateComputePipelines', 'vkBeginCommandBuffer', 'vkCmdBindPipeline', 'vkCmdBindDescriptorSets', 'vkCmdDispatch', 'vkEndCommandBuffer', 'vkQueueSubmit', 'vkWaitForFences', 'END'], v: { pre: { bufs: [{ id: 0, size: 4, data: [1, 2, 3, 4] }, { id: 1, size: 4, data: [10, 20, 30, 40] }, { id: 2, size: 4 }], dsets: [{ id: 0, slots: [0, 1, 2] }] } }, tests: [{ want: { buf: { 2: [11, 22, 33, 44] }, fence: 1 } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { buf: { 2: [6, 9, 8, 200] }, fence: 1 } }] },
+    sol: 'vkCreateComputePipelines p0, 벡터_더하기; vkBeginCommandBuffer; vkCmdBindPipeline p0; vkCmdBindDescriptorSets d0; vkCmdDispatch 1; vkEndCommandBuffer; vkQueueSubmit; vkWaitForFences; END', par: 9,
+  },
+  {
+    id: '10-5', book: 10, kind: '개념', title: '파이프라인 배리어',
+    text: '디스패치 둘: 먼저 c = a + b(p0, 세트 d0), 그다음 d = c × 2(p1, 세트 d1 = [c, d]). GPU는 디스패치를 겹쳐 돌릴 수 있어서, 사이에 배리어가 없으면 둘째가 아직 안 끝난 c를 읽을 수 있어요(게임에선 늘 그렇게 돼요). 배리어는 「앞 컴퓨트 셰이더의 쓰기 → 뒤 컴퓨트 셰이더의 읽기」를 지정한 메모리 배리어예요. 물체는 다 준비돼 있어요 — 녹화만 해요.',
+    hints: ['첫 디스패치와 둘째 묶기 사이에 vkCmdPipelineBarrier.', 'vkBeginCommandBuffer · vkCmdBindPipeline p0 · vkCmdBindDescriptorSets d0 · vkCmdDispatch 1 · vkCmdPipelineBarrier · vkCmdBindPipeline p1 · vkCmdBindDescriptorSets d1 · vkCmdDispatch 1 · vkEndCommandBuffer · vkQueueSubmit · vkWaitForFences · END.'],
+    asm: { vk: true, vec: true, ops: ['vkCreateBuffer', 'vkAllocateMemory', 'vkBindBufferMemory', 'memcpy', 'vkAllocateDescriptorSets', 'vkUpdateDescriptorSets', 'vkCreateComputePipelines', 'vkBeginCommandBuffer', 'vkCmdBindPipeline', 'vkCmdBindDescriptorSets', 'vkCmdDispatch', 'vkCmdPipelineBarrier', 'vkEndCommandBuffer', 'vkQueueSubmit', 'vkWaitForFences', 'END'], v: { pre: { bufs: [{ id: 0, size: 4, data: [1, 2, 3, 4] }, { id: 1, size: 4, data: [10, 20, 30, 40] }, { id: 2, size: 4 }, { id: 3, size: 4 }], dsets: [{ id: 0, slots: [0, 1, 2] }, { id: 1, slots: [2, 3] }], pipes: [{ id: 0, k: 0 }, { id: 1, k: 1 }] } }, tests: [{ want: { buf: { 2: [11, 22, 33, 44], 3: [22, 44, 66, 88] }, fence: 1 } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { buf: { 2: [6, 9, 8, 200], 3: [12, 18, 16, 144] }, fence: 1 } }] },
+    sol: 'vkBeginCommandBuffer; vkCmdBindPipeline p0; vkCmdBindDescriptorSets d0; vkCmdDispatch 1; vkCmdPipelineBarrier; vkCmdBindPipeline p1; vkCmdBindDescriptorSets d1; vkCmdDispatch 1; vkEndCommandBuffer; vkQueueSubmit; vkWaitForFences; END', par: 12,
+  },
+  {
+    id: '10-6', book: 10, kind: '연습', title: '한 벌',
+    text: '처음부터 끝까지 — 이 게임의 마지막 일이에요. a(b0)·b(b1)만 데이터와 함께 있어요. c 버퍼와 메모리, 디스크립터 세트, 파이프라인을 만들고, 녹화하고, 내고, 기다려요. NAND 하나에서 시작해 여기까지 왔어요: 이 열여섯 줄이 드라이버 함수가 되고, PM4가 되고, CP가 읽고, 웨이브가 돌아요.',
+    hints: ['10-1(c 만들기) + 10-3(세트) + 10-4(녹화·제출).', 'vkCreateBuffer b2, 4 · vkAllocateMemory m2, 4 · vkBindBufferMemory b2, m2, 0 · vkAllocateDescriptorSets d0 · vkUpdateDescriptorSets d0, 0, b0 · …, 1, b1 · …, 2, b2 · vkCreateComputePipelines p0, 벡터_더하기 · vkBeginCommandBuffer · vkCmdBindPipeline p0 · vkCmdBindDescriptorSets d0 · vkCmdDispatch 1 · vkEndCommandBuffer · vkQueueSubmit · vkWaitForFences · END.'],
+    asm: { vk: true, vec: true, ops: ['vkCreateBuffer', 'vkAllocateMemory', 'vkBindBufferMemory', 'memcpy', 'vkAllocateDescriptorSets', 'vkUpdateDescriptorSets', 'vkCreateComputePipelines', 'vkBeginCommandBuffer', 'vkCmdBindPipeline', 'vkCmdBindDescriptorSets', 'vkCmdDispatch', 'vkCmdPipelineBarrier', 'vkEndCommandBuffer', 'vkQueueSubmit', 'vkWaitForFences', 'END'], v: { pre: { bufs: [{ id: 0, size: 4, data: [1, 2, 3, 4] }, { id: 1, size: 4, data: [10, 20, 30, 40] }] } }, tests: [{ want: { buf: { 2: [11, 22, 33, 44] }, fence: 1 } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { buf: { 2: [6, 9, 8, 200] }, fence: 1 } }] },
+    sol: 'vkCreateBuffer b2, 4; vkAllocateMemory m2, 4; vkBindBufferMemory b2, m2, 0; vkAllocateDescriptorSets d0; vkUpdateDescriptorSets d0, 0, b0; vkUpdateDescriptorSets d0, 1, b1; vkUpdateDescriptorSets d0, 2, b2; vkCreateComputePipelines p0, 벡터_더하기; vkBeginCommandBuffer; vkCmdBindPipeline p0; vkCmdBindDescriptorSets d0; vkCmdDispatch 1; vkEndCommandBuffer; vkQueueSubmit; vkWaitForFences; END', par: 16,
+  },
+  {
+    id: '10-7', book: 10, kind: '시험', title: '마지막 시험', pool: ['10-2', '10-4', '10-5', '10-6'], rounds: 3,
+    text: '10부의 Vulkan 일 중 하나를 매번 뽑아요. 세 번 연달아 — 넘기면 NAND에서 Vulkan까지 다 지나온 거예요.',
   },
 ];
