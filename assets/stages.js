@@ -123,6 +123,93 @@ export function asmStep(prog, m) {
   m.steps++;
   return m;
 }
+// ---------- 5부 벡터: 작은 웨이브 ----------
+// 단순화: 레인 4개(AMD 실제는 wave32/wave64), 레지스터 8비트(실제 32비트), v0~v3·s0~s3만.
+// EXEC·VCC는 레인마다 한 자리(실제 64레인이면 s 두 개, s[0:1]에 담아요). 이름 옆 real = AMD RDNA ISA의 실제 명령.
+// 인자 종류: v = v0~v3, s = s0~s3, vs = v0~v3 또는 s0~s3(0~3 = v, 4~7 = s), n = 수 0~15, k = 줄 번호
+export const LANES = 4;
+// 5부 화면에 늘 붙는 단순화 설명(OCL 사실 검토 11-05 반영)
+export const VEC_NOTE = '이 게임은 AMD RDNA를 단순화했어요. 레인은 4개, 데이터 레지스터는 8비트(실제 데이터 연산은 32비트라, 여기선 하위 8비트만 남아요)이고 v0~v3·s0~s3만 써요. EXEC·VCC는 레인마다 한 자리인 마스크로, wave64 마스크를 보통 s 레지스터에 담을 땐 32비트 둘(s[2:3])을 써요. 실제로는 여기 나온 S_SAVEEXEC·S_XOREXEC·S_OREXEC의 대응 명령과 s_add_u32도 SCC를 바꾸지만, 게임에선 S_CMP_EQ만 SCC를 바꿔요. 두 번째 원본에 s를 쓰는 줄은 실제로는 VOP3 형식(예: v_sub_nc_u32_e64 v1, v1, s0)으로 인코딩해요. 분기는 0부터 센 줄 번호로 가요 — 실제 어셈블리는 레이블을 쓰고, 기계어엔 다음 명령 기준의 부호 있는 오프셋이 들어가요.';
+export const VISA = {
+  V_MOV: { args: ['v', 'vs'], real: 'v_mov_b32', desc: 'vD ← 원본 (켜진 레인만)' },
+  V_MOVI: { args: ['v', 'n'], real: 'v_mov_b32 (상수)', desc: 'vD ← 수 n (켜진 레인만)' },
+  V_ADD: { args: ['v', 'vs', 'vs'], real: 'v_add_nc_u32', desc: 'vD ← a + b (켜진 레인만)' },
+  V_SUB: { args: ['v', 'vs', 'vs'], real: 'v_sub_nc_u32', desc: 'vD ← a − b (켜진 레인만)' },
+  V_CMP_GT: { args: ['vs', 'vs'], real: 'v_cmp_gt_u32', desc: 'VCC ← 레인마다 a > b (꺼진 레인은 0)' },
+  V_CMP_EQ: { args: ['vs', 'vs'], real: 'v_cmp_eq_u32', desc: 'VCC ← 레인마다 a = b (꺼진 레인은 0)' },
+  V_CNDMASK: { args: ['v', 'vs', 'vs'], real: 'v_cndmask_b32', desc: 'vD ← 켜진 레인에서 VCC가 1이면 b, 0이면 a' },
+  V_READFIRSTLANE: { args: ['s', 'v'], real: 'v_readfirstlane_b32', desc: 'sD ← 첫 번째 켜진 레인의 v' },
+  S_MOVI: { args: ['s', 'n'], real: 's_mov_b32', desc: 'sD ← 수 n' },
+  S_ADDI: { args: ['s', 'n'], real: 's_add_u32', desc: 'sD ← sD + n (실제로는 SCC에 올림도 써요 — 게임은 생략)' },
+  S_CMP_EQ: { args: ['s', 's'], real: 's_cmp_eq_u32', desc: '같으면 SCC = 1, 다르면 0' },
+  S_GETEXEC: { args: ['s'], real: 's_mov_b64 s[2:3], exec', desc: 'sD ← EXEC' },
+  S_SAVEEXEC: { args: ['s'], real: 's_and_saveexec_b64 s[2:3], vcc', desc: 'sD ← EXEC, 그리고 EXEC ← EXEC AND VCC' },
+  S_XOREXEC: { args: ['s'], real: 's_xor_b64 exec, exec, s[2:3]', desc: 'EXEC ← EXEC XOR sD' },
+  S_OREXEC: { args: ['s'], real: 's_or_b64 exec, exec, s[2:3]', desc: 'EXEC ← EXEC OR sD' },
+  S_BRANCH: { args: ['k'], real: 's_branch', desc: 'k번 줄로' },
+  S_CBRANCH_SCC1: { args: ['k'], real: 's_cbranch_scc1', desc: 'SCC가 1이면 k번 줄로' },
+  S_CBRANCH_EXECZ: { args: ['k'], real: 's_cbranch_execz', desc: 'EXEC가 0(켜진 레인 없음)이면 k번 줄로' },
+  S_ENDPGM: { args: [], real: 's_endpgm', desc: '끝' },
+};
+// 'V_ADD v1, s0, v1' → { op, a: [1, 4, 1] }
+export const parseVec = (t) => t.split(';').map((x) => x.trim()).filter(Boolean).map((x) => {
+  const [op, ...rest] = x.split(/[\s,]+/).filter(Boolean);
+  return { op, a: VISA[op].args.map((k, i) => { const r = rest[i]; if (k === 'n' || k === 'k') return +r; const j = +r.slice(1); return k === 'vs' && r[0] === 's' ? 4 + j : j; }) };
+});
+export function vecInit(asm, x) {
+  const v = Array.from({ length: 4 }, (_, r) => Array.from({ length: LANES }, (_, l) => (r === 0 ? l : 0))); // v0 = 레인 번호
+  for (const src of [asm.v, x.v]) if (src) for (const [r, arr] of Object.entries(src)) v[r] = arr.slice();
+  const sr = [0, 0, 0, 0];
+  for (const src of [asm.s, x.s]) if (src) for (const [r, val] of Object.entries(src)) sr[r] = val;
+  return { pc: 0, exec: x.exec ?? asm.exec ?? 15, vcc: 0, scc: 0, v, s: sr, halted: false, steps: 0 };
+}
+export function vecStep(prog, m) {
+  if (m.halted) return m;
+  if (m.pc >= prog.length) { m.halted = true; return m; }
+  const { op, a } = prog[m.pc];
+  const on = (l) => (m.exec >> l) & 1;
+  const src = (x, l) => (x < 4 ? m.v[x][l] : m.s[x - 4]);
+  const each = (fn) => { for (let l = 0; l < LANES; l++) if (on(l)) m.v[a[0]][l] = fn(l) & 255; };
+  let next = m.pc + 1;
+  if (op === 'S_ENDPGM') { m.halted = true; return m; }
+  if (op === 'V_MOV') each((l) => src(a[1], l));
+  else if (op === 'V_MOVI') each(() => a[1]);
+  else if (op === 'V_ADD') each((l) => src(a[1], l) + src(a[2], l));
+  else if (op === 'V_SUB') each((l) => src(a[1], l) - src(a[2], l));
+  else if (op === 'V_CMP_GT' || op === 'V_CMP_EQ') {
+    m.vcc = 0;
+    for (let l = 0; l < LANES; l++) if (on(l) && (op === 'V_CMP_GT' ? src(a[0], l) > src(a[1], l) : src(a[0], l) === src(a[1], l))) m.vcc |= 1 << l;
+  } else if (op === 'V_CNDMASK') each((l) => ((m.vcc >> l) & 1 ? src(a[2], l) : src(a[1], l)));
+  else if (op === 'V_READFIRSTLANE') { let l = 0; while (l < LANES && !on(l)) l++; m.s[a[0]] = m.v[a[1]][l < LANES ? l : 0]; }
+  else if (op === 'S_MOVI') m.s[a[0]] = a[1];
+  else if (op === 'S_ADDI') m.s[a[0]] = (m.s[a[0]] + a[1]) & 255;
+  else if (op === 'S_CMP_EQ') m.scc = m.s[a[0]] === m.s[a[1]] ? 1 : 0;
+  else if (op === 'S_GETEXEC') m.s[a[0]] = m.exec;
+  else if (op === 'S_SAVEEXEC') { m.s[a[0]] = m.exec; m.exec &= m.vcc; }
+  else if (op === 'S_XOREXEC') m.exec = (m.exec ^ m.s[a[0]]) & 15;
+  else if (op === 'S_OREXEC') m.exec = (m.exec | m.s[a[0]]) & 15;
+  else if (op === 'S_BRANCH') next = a[0];
+  else if (op === 'S_CBRANCH_SCC1') { if (m.scc) next = a[0]; }
+  else if (op === 'S_CBRANCH_EXECZ') { if (!m.exec) next = a[0]; }
+  m.pc = next;
+  m.steps++;
+  return m;
+}
+export function vecRun(prog, asm, x, limit = 2000) {
+  const m = vecInit(asm, x);
+  while (!m.halted && m.steps < limit) vecStep(prog, m);
+  if (!m.halted) m.err = 'loop';
+  return m;
+}
+export function vecOk(x, m) {
+  if (m.err) return false;
+  const w = x.want || {};
+  for (const [r, arr] of Object.entries(w.v || {})) if (arr.some((val, l) => val != null && m.v[r][l] !== val)) return false;
+  for (const [r, val] of Object.entries(w.s || {})) if (m.s[r] !== val) return false;
+  if (x.maxSteps != null && m.steps > x.maxSteps) return false;
+  return true;
+}
+
 export const asmInit = (ram) => ({ pc: 0, a: 0, ram: Array.from({ length: 16 }, (_, i) => (ram && ram[i]) || 0), out: [], halted: false, steps: 0 });
 export function asmRun(prog, ram, limit = 2000) {
   const m = asmInit(ram);
@@ -713,5 +800,136 @@ export const STAGES = [
   {
     id: '4-21', book: 4, kind: '시험', title: '4부 시험', pool: ['4-12', '4-14', '4-16', '4-17', '4-18'], rounds: 3,
     text: '4부의 프로그램 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 5부(병렬 — GPU 쪽)로 가요.',
+  },
+  // ---------- 5부 병렬 ----------
+  // 사실 근거: AMD RDNA ISA 문서(공개), LLVM AMDGPU 문서. 단순화는 스테이지 글에 「단순화」로 적는다.
+  {
+    id: '5-1', book: 5, kind: '개념', title: '두 레인',
+    text: '명령 하나(op)를 레인 둘이 동시에 따라 해요 — op는 같이 쓰고 데이터는 레인마다 달라요. op가 0이면 AND, 1이면 XOR. AMD GPU는 벡터 명령 하나를 wave32나 wave64의 켜진 레인 모두에 적용해요 — 모두 한 사이클에 끝난다는 뜻은 아니에요. 여기선 둘로 단순화했어요.',
+    hints: ['2-16 「연산 고르기」를 레인마다 하나씩.', '레인마다 MUX(AND(Ai,Bi), XOR(Ai,Bi), op). op 선은 두 MUX에 같이.'],
+    sol: 'x=AND(A0,B0); y=XOR(A0,B0); r=MUX(x,y,op); u=AND(A1,B1); w=XOR(A1,B1); t=MUX(u,w,op); @0=r; @1=t',
+    ins: ['op', 'A0', 'B0', 'A1', 'B1'], outs: ['R0', 'R1'], par: 20,
+    fn: ([op, a0, b0, a1, b1]) => [op ? a0 ^ b0 : a0 & b0, op ? a1 ^ b1 : a1 & b1],
+  },
+  {
+    id: '5-2', book: 5, kind: '개념', title: 'EXEC 마스크',
+    text: 'EXEC는 레인마다 한 자리. 보통의 벡터 연산은 EXEC가 1인 레인만 결과(VGPR)를 바꾸고, 0인 레인은 원래 값이 그대로예요. 여기선 이걸 「쓰기 신호를 막는 회로」로 단순화해요 — wa에 레인의 EXEC 자리를 AND. (스칼라 명령과 뒤에 나올 V_READFIRSTLANE은 따로 규칙이 있어요.)',
+    hints: ['레인마다 BIT 하나. 「이번에 쓸까」 = wa AND e(레인).', 'R0 = BIT(d0, AND(wa, e0), clk), R1 = BIT(d1, AND(wa, e1), clk).'],
+    sol: 'a=AND(wa,e0); c=AND(wa,e1); r=BIT(d0,a,clk); t=BIT(d1,c,clk); @0=r; @1=t',
+    ins: ['wa', 'e0', 'e1', 'd0', 'd1', 'clk'], outs: ['R0', 'R1'], par: 30,
+    steps: tick('11111', '11000', '00111', '10110', '11111'),
+    model: clocked(5, (st, [wa, e0, e1, d0, d1]) => { st.r = st.r || [0, 0]; if (wa && e0) st.r[0] = d0; if (wa && e1) st.r[1] = d1; }, (st) => (st.r ? st.r.slice() : [0, 0])),
+  },
+  {
+    id: '5-3', book: 5, kind: '개념', title: '비교는 마스크로',
+    text: '비교(v_cmp)는 레인마다 답 한 자리를 내서 VCC 마스크로 모아요. 여기선 레인마다 「A > B」(한 자리라 A=1, B=0일 때). 꺼진 레인(E=0)은 0을 써요.',
+    hints: ['1-7 「A이면서 B는 아님」을 레인마다, 그리고 E로 한 번 더 걸러요.', 'VCCi = AND(AND(Ai, NOT Bi), Ei).'],
+    sol: 'n=NOT(B0); x=AND(A0,n); v=AND(x,E0); m=NOT(B1); y=AND(A1,m); w=AND(y,E1); @0=v; @1=w',
+    ins: ['E0', 'E1', 'A0', 'B0', 'A1', 'B1'], outs: ['VCC0', 'VCC1'], par: 10,
+    fn: ([e0, e1, a0, b0, a1, b1]) => [b(e0 && a0 && !b0), b(e1 && a1 && !b1)],
+  },
+  {
+    id: '5-4', book: 5, kind: '연습', title: '레인마다 고르기',
+    text: 'v_cndmask는 EXEC가 켜진 레인에서 VCC를 보고 둘 중 하나를 써요 — VCC=1이면 B, 0이면 A(꺼진 레인은 원래 값 그대로). 분기 없이 「if」를 하는 방법이에요. 이 회로는 고르는 부분만이고, 레지스터 쓰기는 5-2처럼 EXEC가 따로 막아요.',
+    hints: ['레인마다 선택기 하나.', 'Ri = MUX(Ai, Bi, VCCi).'],
+    sol: 'x=MUX(A0,B0,VCC0); y=MUX(A1,B1,VCC1); @0=x; @1=y',
+    ins: ['VCC0', 'VCC1', 'A0', 'B0', 'A1', 'B1'], outs: ['R0', 'R1'], par: 8,
+    fn: ([v0, v1, a0, b0, a1, b1]) => [v0 ? b0 : a0, v1 ? b1 : a1],
+  },
+  {
+    id: '5-5', book: 5, kind: '연습', title: '켜진 레인이 없나',
+    text: '레인 넷의 EXEC가 모두 0이면 1. s_cbranch_execz가 이 깃발을 보고 「아무도 할 일이 없으면 건너뛰기」를 해요. 2-13과 같은 모양.',
+    hints: ['「하나라도 1」의 반대.', 'OR 둘, 그리고 NOR.'],
+    sol: 'x=OR(E3,E2); z=OR(E1,E0); y=NOR(x,z); @0=y',
+    ins: ['E3', 'E2', 'E1', 'E0'], outs: ['EXECZ'], par: 10, fn: (v) => [b(v.every((x) => !x))],
+  },
+  // 여기부터 벡터 어셈블리 — 웨이브 하나(레인 4개)가 줄을 같이 지나가요
+  {
+    id: '5-6', book: 5, kind: '개념', title: '레인마다 더하기',
+    text: '이제 벡터 명령. v 레지스터는 레인마다 따로(VGPR), s 레지스터는 웨이브에 하나(SGPR). v1과 v2를 레인마다 더해 v1에. 줄 하나가 레인 넷에서 동시에 돌아요.',
+    hints: ['V_ADD 한 줄이면 레인 넷이 다 더해요.', 'V_ADD v1, v1, v2 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'S_ENDPGM'], tests: [{ v: { 1: [1, 2, 3, 4], 2: [10, 20, 30, 40] }, want: { v: { 1: [11, 22, 33, 44] } } }, { v: { 1: [5, 0, 9, 200], 2: [5, 7, 0, 100] }, want: { v: { 1: [10, 7, 9, 44] } } }] },
+    sol: 'V_ADD v1, v1, v2; S_ENDPGM', par: 2,
+  },
+  {
+    id: '5-7', book: 5, kind: '개념', title: '스칼라를 모든 레인에',
+    text: 's0은 웨이브에 하나뿐인 값(예: 커널 인자 — 7부에서 와요). 모든 레인의 v1에 s0을 더해요. 실제 ISA도 벡터 명령의 첫 원본에 s를 쓸 수 있어요.',
+    hints: ['V_ADD의 원본 하나를 s0으로.', 'V_ADD v1, s0, v1 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'S_ENDPGM'], tests: [{ v: { 1: [1, 2, 3, 4] }, s: { 0: 10 }, want: { v: { 1: [11, 12, 13, 14] } } }, { v: { 1: [0, 5, 250, 9] }, s: { 0: 7 }, want: { v: { 1: [7, 12, 1, 16] } } }] },
+    sol: 'V_ADD v1, s0, v1; S_ENDPGM', par: 2,
+  },
+  {
+    id: '5-8', book: 5, kind: '연습', title: '레인 번호 쓰기',
+    text: '게임에선 시작할 때 v0에 레인 번호 0·1·2·3을 넣어 줘요(단순화 — 실제 컴퓨트 셰이더도 작업의 로컬 좌표를 첫 VGPR로 받을 수 있지만, 그 값이 늘 레인 번호와 같지는 않아요). v1 = s0 + 레인 번호 × 2 를 만들어요 — 「내 칸의 주소」를 셈하는 모양이에요.',
+    hints: ['곱하기는 없어요 — 자기 자신을 더하면 두 배.', 'V_ADD v2, v0, v0 · V_ADD v1, s0, v2 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'S_ENDPGM'], tests: [{ s: { 0: 100 }, want: { v: { 1: [100, 102, 104, 106] } } }, { s: { 0: 0 }, want: { v: { 1: [0, 2, 4, 6] } } }] },
+    sol: 'V_ADD v2, v0, v0; V_ADD v1, s0, v2; S_ENDPGM', par: 3,
+  },
+  {
+    id: '5-9', book: 5, kind: '개념', title: '꺼진 레인',
+    text: '이번엔 게임이 EXEC를 레인 0·2만 켜진 채로 시작해요 — 실제로도 분기를 지나면 이런 마스크가 생겨요. (워크그룹 크기가 웨이브 크기의 배수가 아니면 마지막 웨이브가 일부만 켜지기도 하는데, 그땐 보통 앞쪽 레인이 이어서 켜져요.) 켜진 레인의 v1에 1을 더해요 — 꺼진 레인은 그대로 남는지 보세요.',
+    hints: ['상수 1은 V_MOVI로 v 레지스터에 먼저.', 'V_MOVI v2, 1 · V_ADD v1, v1, v2 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'S_ENDPGM'], exec: 0b0101, tests: [{ v: { 1: [10, 20, 30, 40] }, want: { v: { 1: [11, 20, 31, 40] } } }, { v: { 1: [0, 0, 255, 7] }, want: { v: { 1: [1, 0, 0, 7] } } }] },
+    sol: 'V_MOVI v2, 1; V_ADD v1, v1, v2; S_ENDPGM', par: 3,
+  },
+  {
+    id: '5-10', book: 5, kind: '개념', title: '갈림 없이 고르기',
+    text: '레인마다 v1과 v2 중 큰 쪽을 v1에. 비교(V_CMP_GT)는 VCC에 레인마다 답을 쓰고, V_CNDMASK가 그 답으로 골라요 — 레인이 갈라지지 않아요.',
+    hints: ['「v2가 더 큰 레인」을 VCC에, 그 레인만 v2를 골라요.', 'V_CMP_GT v2, v1 · V_CNDMASK v1, v1, v2 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'S_ENDPGM'], tests: [{ v: { 1: [3, 9, 5, 0], 2: [7, 2, 5, 1] }, want: { v: { 1: [7, 9, 5, 1] } } }, { v: { 1: [100, 0, 50, 8], 2: [99, 1, 51, 8] }, want: { v: { 1: [100, 1, 51, 8] } } }] },
+    sol: 'V_CMP_GT v2, v1; V_CNDMASK v1, v1, v2; S_ENDPGM', par: 3,
+  },
+  {
+    id: '5-11', book: 5, kind: '연습', title: '차이의 크기',
+    text: '레인마다 |v1 − v2|를 v1에. 두 쪽으로 다 빼 놓고 고르면 돼요.',
+    hints: ['a − b와 b − a를 둘 다 만들고, 「a > b」 VCC로 골라요.', 'V_CMP_GT v1, v2 · V_SUB v3, v1, v2 · V_SUB v2, v2, v1 · V_CNDMASK v1, v2, v3 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'S_ENDPGM'], tests: [{ v: { 1: [9, 2, 5, 0], 2: [4, 7, 5, 3] }, want: { v: { 1: [5, 5, 0, 3] } } }, { v: { 1: [200, 1, 30, 31], 2: [100, 101, 31, 30] }, want: { v: { 1: [100, 100, 1, 1] } } }] },
+    sol: 'V_CMP_GT v1, v2; V_SUB v3, v1, v2; V_SUB v2, v2, v1; V_CNDMASK v1, v2, v3; S_ENDPGM', par: 5,
+  },
+  {
+    id: '5-12', book: 5, kind: '개념', title: '갈림 (if)',
+    text: 'v1 > s0인 레인만 v1 = v1 − s0. 「if」는 EXEC로 해요: 비교해서 VCC를 만들고, S_SAVEEXEC로 지금 EXEC를 s1에 담으며 EXEC를 VCC와 AND — 조건이 거짓인 레인이 꺼져요. 몸통을 지나고 S_OREXEC s1로 되켜요.',
+    hints: ['비교 → EXEC 좁히기 → 몸통 → EXEC 되돌리기.', 'V_CMP_GT v1, s0 · S_SAVEEXEC s1 · V_SUB v1, v1, s0 · S_OREXEC s1 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'S_SAVEEXEC', 'S_XOREXEC', 'S_OREXEC', 'S_ENDPGM'], tests: [{ v: { 1: [3, 9, 5, 12] }, s: { 0: 5 }, want: { v: { 1: [3, 4, 5, 7] } } }, { v: { 1: [1, 2, 3, 4] }, s: { 0: 1 }, want: { v: { 1: [1, 1, 2, 3] } } }, { v: { 1: [1, 2, 3, 4] }, s: { 0: 9 }, want: { v: { 1: [1, 2, 3, 4] } } }] },
+    sol: 'V_CMP_GT v1, s0; S_SAVEEXEC s1; V_SUB v1, v1, s0; S_OREXEC s1; S_ENDPGM', par: 5,
+  },
+  {
+    id: '5-13', book: 5, kind: '개념', title: '갈림 (if / else)',
+    text: 'v1 > s0이면 v1 − s0, 아니면 v1 + s0. else는 EXEC를 뒤집어서 해요: 담아 둔 s1과 XOR하면 「처음엔 켜져 있었는데 지금 꺼진」 레인만 켜져요. 레인이 갈리면 웨이브는 then과 else를 둘 다 지나가요 — 갈림의 값이에요.',
+    hints: ['5-12 몸통 뒤에 EXEC 뒤집기, 그리고 else 몸통, 마지막에 되돌리기.', 'V_CMP_GT v1, s0 · S_SAVEEXEC s1 · V_SUB v1, v1, s0 · S_XOREXEC s1 · V_ADD v1, v1, s0 · S_OREXEC s1 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'S_SAVEEXEC', 'S_XOREXEC', 'S_OREXEC', 'S_ENDPGM'], tests: [{ v: { 1: [3, 9, 5, 12] }, s: { 0: 5 }, want: { v: { 1: [8, 4, 10, 7] } } }, { v: { 1: [10, 20, 30, 40] }, s: { 0: 1 }, want: { v: { 1: [9, 19, 29, 39] } } }, { v: { 1: [0, 1, 2, 3] }, s: { 0: 7 }, want: { v: { 1: [7, 8, 9, 10] } } }] },
+    sol: 'V_CMP_GT v1, s0; S_SAVEEXEC s1; V_SUB v1, v1, s0; S_XOREXEC s1; V_ADD v1, v1, s0; S_OREXEC s1; S_ENDPGM', par: 7,
+  },
+  {
+    id: '5-14', book: 5, kind: '연습', title: '아무도 없으면 건너뛰기',
+    text: 'v1 > s0인 레인만 v1을 세 배로. 그런데 조건이 참인 레인이 하나도 없으면 몸통을 통째로 건너뛰어요 — S_CBRANCH_EXECZ. 세 번째 입력(아무도 안 들어감)은 끝 줄(S_ENDPGM)을 빼고 4걸음 안에 끝나야 해요.',
+    hints: ['S_SAVEEXEC 바로 뒤에 「EXEC가 0이면 S_OREXEC 줄로」.', 'V_CMP_GT v1, s0 · S_SAVEEXEC s1 · S_CBRANCH_EXECZ 5 · V_ADD v2, v1, v1 · V_ADD v1, v2, v1 · S_OREXEC s1 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'S_SAVEEXEC', 'S_XOREXEC', 'S_OREXEC', 'S_CBRANCH_EXECZ', 'S_ENDPGM'], tests: [{ v: { 1: [3, 9, 5, 12] }, s: { 0: 5 }, want: { v: { 1: [3, 27, 5, 36] } } }, { v: { 1: [1, 2, 3, 4] }, s: { 0: 0 }, want: { v: { 1: [3, 6, 9, 12] } } }, { v: { 1: [1, 2, 3, 4] }, s: { 0: 9 }, want: { v: { 1: [1, 2, 3, 4] } }, maxSteps: 4 }] },
+    sol: 'V_CMP_GT v1, s0; S_SAVEEXEC s1; S_CBRANCH_EXECZ 5; V_ADD v2, v1, v1; V_ADD v1, v2, v1; S_OREXEC s1; S_ENDPGM', par: 7,
+  },
+  {
+    id: '5-15', book: 5, kind: '개념', title: '스칼라 되풀이',
+    text: '모든 레인의 v1을 s0배로. 되풀이 횟수가 레인마다 같으니 세는 건 스칼라(s1)로 — 레인은 갈라지지 않아요. S_CMP_EQ가 두 값이 같으면 SCC를 1, 다르면 0으로 만들고, S_CBRANCH_SCC1이 1일 때 빠져나와요. 처음엔 s1·v2가 0이에요.',
+    hints: ['「s1 = s0이면 끝, 아니면 v2 += v1, s1 += 1, 다시」, 끝나면 v1 ← v2.', 'S_CMP_EQ s1, s0 · S_CBRANCH_SCC1 5 · V_ADD v2, v2, v1 · S_ADDI s1, 1 · S_BRANCH 0 · V_MOV v1, v2 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'S_SAVEEXEC', 'S_XOREXEC', 'S_OREXEC', 'S_CBRANCH_EXECZ', 'S_MOVI', 'S_ADDI', 'S_CMP_EQ', 'S_BRANCH', 'S_CBRANCH_SCC1', 'S_ENDPGM'], tests: [{ v: { 1: [1, 2, 3, 4] }, s: { 0: 3 }, want: { v: { 1: [3, 6, 9, 12] } } }, { v: { 1: [7, 0, 9, 5] }, s: { 0: 0 }, want: { v: { 1: [0, 0, 0, 0] } } }, { v: { 1: [10, 20, 1, 2] }, s: { 0: 5 }, want: { v: { 1: [50, 100, 5, 10] } } }] },
+    sol: 'S_CMP_EQ s1, s0; S_CBRANCH_SCC1 5; V_ADD v2, v2, v1; S_ADDI s1, 1; S_BRANCH 0; V_MOV v1, v2; S_ENDPGM', par: 7,
+  },
+  {
+    id: '5-16', book: 5, kind: '개념', title: '레인마다 다른 되풀이',
+    text: '레인마다 v2 = 1 + 2 + … + v1. 이번엔 레인마다 도는 횟수가 달라요. 끝난 레인은 EXEC에서 빠지고, 모두 끝나야 웨이브가 빠져나와요 — 이 되풀이의 횟수는 처음 켜져 있던 레인 중 가장 많이 도는 레인이 정해요. 처음엔 v2·v3이 0이에요(합이 255를 넘으면 하위 8비트만 남아요 — 입력은 작게 뒀어요).',
+    hints: ['되풀이 전에 EXEC를 s2에 담아 두고, 머리에서 「v1 > 0」으로 EXEC를 좁혀요. 아무도 안 남으면 빠져나와 s2로 되켜요.', 'S_MOVI s1, 1 · S_GETEXEC s2 · V_CMP_GT v1, v3 · S_SAVEEXEC s3 · S_CBRANCH_EXECZ 8 · V_ADD v2, v2, v1 · V_SUB v1, v1, s1 · S_BRANCH 2 · S_OREXEC s2 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'V_READFIRSTLANE', 'S_GETEXEC', 'S_SAVEEXEC', 'S_XOREXEC', 'S_OREXEC', 'S_CBRANCH_EXECZ', 'S_MOVI', 'S_ADDI', 'S_CMP_EQ', 'S_BRANCH', 'S_CBRANCH_SCC1', 'S_ENDPGM'], tests: [{ v: { 1: [1, 2, 3, 4] }, want: { v: { 2: [1, 3, 6, 10] } } }, { v: { 1: [0, 5, 0, 10] }, want: { v: { 2: [0, 15, 0, 55] } } }] },
+    sol: 'S_MOVI s1, 1; S_GETEXEC s2; V_CMP_GT v1, v3; S_SAVEEXEC s3; S_CBRANCH_EXECZ 8; V_ADD v2, v2, v1; V_SUB v1, v1, s1; S_BRANCH 2; S_OREXEC s2; S_ENDPGM', par: 10,
+  },
+  {
+    id: '5-17', book: 5, kind: '연습', title: '레인 하나를 스칼라로',
+    text: 'V_READFIRSTLANE은 첫 번째 켜진 레인의 값을 s 레지스터로 옮겨요. 그 값을 켜진 레인 모두의 v1에 더해요. EXEC가 일부만 켜진 입력도 있어요.',
+    hints: ['읽어서 s1에, 그리고 V_ADD.', 'V_READFIRSTLANE s1, v1 · V_ADD v1, v1, s1 · S_ENDPGM.'],
+    asm: { vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'V_CMP_GT', 'V_CMP_EQ', 'V_CNDMASK', 'V_READFIRSTLANE', 'S_GETEXEC', 'S_SAVEEXEC', 'S_XOREXEC', 'S_OREXEC', 'S_CBRANCH_EXECZ', 'S_MOVI', 'S_ADDI', 'S_CMP_EQ', 'S_BRANCH', 'S_CBRANCH_SCC1', 'S_ENDPGM'], tests: [{ v: { 1: [5, 1, 2, 3] }, want: { v: { 1: [10, 6, 7, 8] } } }, { exec: 0b0110, v: { 1: [5, 1, 2, 3] }, want: { v: { 1: [5, 2, 3, 3] } } }, { exec: 0b1000, v: { 1: [1, 1, 1, 9] }, want: { v: { 1: [1, 1, 1, 18] } } }] },
+    sol: 'V_READFIRSTLANE s1, v1; V_ADD v1, v1, s1; S_ENDPGM', par: 3,
+  },
+  {
+    id: '5-18', book: 5, kind: '시험', title: '5부 시험', pool: ['5-10', '5-12', '5-13', '5-15'], rounds: 3,
+    text: '5부의 벡터 프로그램 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 6부(메모리)로 가요.',
   },
 ];

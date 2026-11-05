@@ -153,3 +153,18 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .ram .cell.chg { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .outs { margin: 4px 0 8px; }
 .asmt td { font-size: 13px; }
+
+/* 5부 벡터 */
+.prog.vec li { grid-template-columns: 28px 1fr; }
+.prog .vl { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prog .vl .op { margin-right: 4px; }
+.vpal button { font-size: 12px; padding: 6px 8px; min-height: 38px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.argbox { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 2px; }
+.argbox button { min-height: 36px; padding: 4px 10px; }
+.argbox b { min-width: 34px; font-size: 15px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.lanes { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; margin: 8px 0; }
+.lanes th, .lanes td { text-align: center; padding: 4px 2px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.lanes th { font-size: 12px; color: var(--mute); }
+.lanes tr.off td { color: var(--mute); opacity: .55; }
+.lanes td.bit.on { color: var(--accent); font-weight: 700; }
+.sregs { display: flex; gap: 14px; flex-wrap: wrap; font-variant-numeric: tabular-nums; margin-bottom: 6px; }

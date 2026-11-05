@@ -1,4 +1,4 @@
-import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun } from './stages.js';
+import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk } from './stages.js';
 
 const app = document.getElementById('app');
 const SAVE = 'nand-game:v1';
@@ -141,7 +141,7 @@ function setupTask() {
     const v = rec(cur.s.id);
     cur.prog = !temp(cur.s) && v.prog ? JSON.parse(JSON.stringify(v.prog)) : [];
     cur.asel = null; cur.tsel = 0;
-    cur.m = asmInit(ramOf(t, 0));
+    cur.m = machInit(t, 0);
   }
   cur.inVals = specOf().ins.map(() => 0);
 }
@@ -398,6 +398,23 @@ function hookHints() {
 }
 
 // ---------- 4부 어셈블리 ----------
+// 기계 둘: 4부 작은 컴퓨터(cpu) · 5부 작은 웨이브(vec). 편집기·시험 표는 같이 쓴다
+const isVec = (t) => !!t.asm.vec;
+const machInit = (t, k) => (isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
+const machStep = (t, prog, m) => (isVec(t) ? vecStep(prog, m) : asmStep(prog, m));
+const machRun = (t, prog, k) => (isVec(t) ? vecRun(prog, t.asm, t.asm.tests[k]) : asmRun(prog, ramOf(t, k)));
+const machOk = (t, x, m) => (isVec(t) ? vecOk(x, m) : testOk(x, m));
+const parseSol = (t) => (isVec(t) ? parseVec(t.sol) : parseProg(t.sol));
+const VRANGE = { v: 4, s: 4, vs: 8, n: 16, k: 16 };
+const vArg = (kind, x) => (kind === 'v' ? `v${x}` : kind === 's' ? `s${x}` : kind === 'vs' ? (x < 4 ? `v${x}` : `s${x - 4}`) : kind === 'k' ? `→ ${x}` : `${x}`);
+const vLine = (l) => VISA[l.op].args.map((k, i) => vArg(k, l.a[i])).join(', ');
+const lanesOf = (mask) => { const on = []; for (let l = 0; l < LANES; l++) if ((mask >> l) & 1) on.push(l); return on.length === LANES ? '전부' : on.length ? on.join('·') : '없음'; };
+const vRegsTxt = (o) => [
+  ...Object.entries(o.v || {}).map(([r, arr]) => `v${r}=[${arr.map((x) => (x == null ? '·' : x)).join(',')}]`),
+  ...Object.entries(o.s || {}).map(([r, x]) => `s${r}=${x}`),
+  ...(o.exec != null ? [`EXEC 레인 ${lanesOf(o.exec)}`] : []),
+].join(' ') || '–';
+
 const ramOf = (t, k) => ({ ...(t.asm.ram || {}), ...((t.asm.tests[k] || {}).ram || {}) });
 const argTxt = (l) => { const a = ISA[l.op].arg; return a === 'n' ? `${l.n}` : a === 'm' ? `[${l.n}]` : a === 'k' ? `→ ${l.n}` : ''; };
 const codeOf = (l) => ((ISA[l.op].code << 4) | (ISA[l.op].arg ? l.n : 0)).toString(16).toUpperCase().padStart(2, '0');
@@ -415,49 +432,78 @@ function changeProg(fn) {
   if (cur.undo.length > 60) cur.undo.shift();
   fn();
   cur.msg = ''; cur.pass = false;
-  cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+  cur.m = machInit(cur.sub || cur.s, cur.tsel);
   if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; persist(); }
 }
 
 function renderAsm() {
   const s = cur.s, t = cur.sub || s, v = rec(s.id), prog = cur.prog, m = cur.m, a = cur.asel;
-  const init = asmInit(ramOf(t, cur.tsel)).ram;
+  const vec = isVec(t), I = vec ? VISA : ISA;
+  const init = vec ? null : asmInit(ramOf(t, cur.tsel)).ram;
   let h = headHtml();
-  h += '<div class="asm"><ol class="prog">';
+  h += `<div class="asm"><ol class="prog${vec ? ' vec' : ''}">`;
   prog.forEach((l, k) => {
-    h += `<li data-a="asel" data-line="${k}" class="${k === a ? 'sel' : ''}${k === m.pc && !m.halted && m.steps ? ' pc' : ''}"><span class="ln">${k}</span><span class="op">${l.op}</span><span class="arg">${argTxt(l)}</span><span class="code">${codeOf(l)}</span></li>`;
+    const cls = `${k === a ? 'sel' : ''}${k === m.pc && !m.halted && m.steps ? ' pc' : ''}`;
+    h += vec
+      ? `<li data-a="asel" data-line="${k}" class="${cls}"><span class="ln">${k}</span><span class="vl"><b class="op">${l.op}</b> ${vLine(l)}</span></li>`
+      : `<li data-a="asel" data-line="${k}" class="${cls}"><span class="ln">${k}</span><span class="op">${l.op}</span><span class="arg">${argTxt(l)}</span><span class="code">${codeOf(l)}</span></li>`;
   });
   h += '</ol>';
   if (!prog.length) h += '<p class="empty">아래 명령 단추로 줄을 쌓아요. 줄을 누르면 수를 바꾸거나 옮길 수 있어요.</p>';
   if (a != null && prog[a]) {
-    const l = prog[a], arg = ISA[l.op].arg;
+    const l = prog[a];
     h += `<div class="lineedit"><span>${a}번 줄</span>`;
-    if (arg) h += `<button data-a="adec">−</button><b>${l.n}</b><button data-a="ainc">+</button>`;
+    if (vec) VISA[l.op].args.forEach((kd, i) => { h += `<span class="argbox"><button data-a="adec" data-i="${i}">−</button><b>${vArg(kd, l.a[i])}</b><button data-a="ainc" data-i="${i}">+</button></span>`; });
+    else if (ISA[l.op].arg) h += `<button data-a="adec">−</button><b>${l.n}</b><button data-a="ainc">+</button>`;
     h += `<button data-a="aup" ${a ? '' : 'disabled'}>↑</button><button data-a="adown" ${a < prog.length - 1 ? '' : 'disabled'}>↓</button><button data-a="adel" class="warn">지우기</button></div>`;
   }
   h += `<div class="tools"><button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button><button data-a="reset" ${prog.length ? '' : 'disabled'}>처음부터</button></div>`;
-  h += `<div class="palette">${t.asm.ops.map((o) => `<button data-a="aop" data-op="${o}" ${prog.length >= 16 ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
-  h += `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o}${ISA[o].arg ? ' ' + ISA[o].arg : ''}</dt><dd>${ISA[o].desc} <small>기계어 ${ISA[o].code.toString(16).toUpperCase()}_</small></dd>`).join('')}</dl></details>`;
+  h += `<div class="palette${vec ? ' vpal' : ''}">${t.asm.ops.map((o) => `<button data-a="aop" data-op="${o}" ${prog.length >= 16 ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
+  h += vec
+    ? `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VISA[o].args.join(', ')}</dt><dd>${VISA[o].desc} <small>실제: ${VISA[o].real}</small></dd>`).join('')}</dl><p class="ttnote">v = v0~v3(레인마다) · s = s0~s3(웨이브에 하나) · vs = 둘 중 아무거나 · n = 수 · k = 줄 번호</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VEC_NOTE}</p></details>`
+    : `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o}${ISA[o].arg ? ' ' + ISA[o].arg : ''}</dt><dd>${ISA[o].desc} <small>기계어 ${ISA[o].code.toString(16).toUpperCase()}_</small></dd>`).join('')}</dl></details>`;
   h += `<p class="cost">${prog.length}줄${s.par ? ` · 별 두 개는 ${s.par}줄 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''} · 최대 16줄</p></div>`;
 
   // 기계
   h += '<div class="mach">';
   if (t.asm.tests.length > 1) h += `<div class="chips">${t.asm.tests.map((_, k) => `<button data-a="atest" data-t="${k}" class="chip${k === cur.tsel ? ' on' : ''}">입력 ${k + 1}</button>`).join('')}</div>`;
-  h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>A <b>${m.a}</b> <small>${m.a.toString(2).padStart(8, '0')}</small></span><span>${m.halted ? '멈춤' : m.steps >= 2000 ? '안 멈춰요' : m.steps ? `${m.steps}걸음` : '처음'}</span></div>`;
-  h += '<div class="ram">' + m.ram.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
-  h += `<p class="outs">내보낸 것: <b>${m.out.length ? m.out.join(', ') : '–'}</b></p>`;
+  const state = m.halted ? `멈춤 · ${m.steps}걸음` : m.steps >= 2000 ? '안 멈춰요' : m.steps ? `${m.steps}걸음` : '처음';
+  if (vec) {
+    h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>SCC <b>${m.scc}</b></span><span>${state}</span></div>`;
+    h += '<table class="lanes"><thead><tr><th>레인</th><th>EXEC</th><th>VCC</th><th>v0</th><th>v1</th><th>v2</th><th>v3</th></tr></thead><tbody>';
+    for (let l = 0; l < LANES; l++) {
+      const on = (m.exec >> l) & 1;
+      h += `<tr class="${on ? '' : 'off'}"><td>${l}</td><td class="bit${on ? ' on' : ''}">${on}</td><td class="bit${(m.vcc >> l) & 1 ? ' on' : ''}">${(m.vcc >> l) & 1}</td>${m.v.map((r) => `<td>${r[l]}</td>`).join('')}</tr>`;
+    }
+    h += `</tbody></table><div class="sregs">${m.s.map((x, k) => `<span>s${k} <b>${x}</b></span>`).join('')}</div>`;
+  } else {
+    h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>A <b>${m.a}</b> <small>${m.a.toString(2).padStart(8, '0')}</small></span><span>${state}</span></div>`;
+    h += '<div class="ram">' + m.ram.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
+    h += `<p class="outs">내보낸 것: <b>${m.out.length ? m.out.join(', ') : '–'}</b></p>`;
+  }
   h += `<div class="tools"><button data-a="astep" ${m.halted || !prog.length ? 'disabled' : ''}>한 줄</button><button data-a="arun" ${m.halted || !prog.length ? 'disabled' : ''}>끝까지</button><button data-a="areset">처음으로</button></div>`;
   h += '</div>';
 
   // 시험 표
   h += '<table class="tt asmt"><thead><tr><th>#</th><th>입력</th><th class="want gap">원함</th><th class="gap">지금</th></tr></thead><tbody>';
   t.asm.tests.forEach((x, k) => {
-    const r = asmRun(prog, ramOf(t, k)), ok = prog.length && testOk(x, r);
-    const got = r.err ? '안 멈춰요' : wantTxt({ out: x.out ? r.out : null, mem: x.mem ? Object.fromEntries(Object.keys(x.mem).map((j) => [j, r.ram[j]])) : null });
-    h += `<tr data-a="atest" data-t="${k}" class="${k === cur.tsel ? 'cur' : ''}"><td>${k + 1}</td><td>${ramTxt((x.ram) || {})}</td><td class="want gap">${wantTxt(x)}</td><td class="gap ${prog.length ? (ok ? 'ok' : 'bad') : 'none'}">${prog.length ? got : '–'}</td></tr>`;
+    const r = machRun(t, prog, k), ok = prog.length && machOk(t, x, r);
+    let inTxt, wTxt, got;
+    if (vec) {
+      const w = x.want || {};
+      inTxt = vRegsTxt({ v: x.v, s: x.s, exec: x.exec });
+      wTxt = vRegsTxt(w) + (x.maxSteps != null ? ` · ${x.maxSteps}걸음 이하` : '');
+      got = r.err ? '안 멈춰요' : vRegsTxt({ v: Object.fromEntries(Object.keys(w.v || {}).map((j) => [j, r.v[j]])), s: Object.fromEntries(Object.keys(w.s || {}).map((j) => [j, r.s[j]])) }) + (x.maxSteps != null ? ` · ${r.steps}걸음` : '');
+    } else {
+      inTxt = ramTxt(x.ram || {});
+      wTxt = wantTxt(x);
+      got = r.err ? '안 멈춰요' : wantTxt({ out: x.out ? r.out : null, mem: x.mem ? Object.fromEntries(Object.keys(x.mem).map((j) => [j, r.ram[j]])) : null });
+    }
+    h += `<tr data-a="atest" data-t="${k}" class="${k === cur.tsel ? 'cur' : ''}"><td>${k + 1}</td><td>${inTxt}</td><td class="want gap">${wTxt}</td><td class="gap ${prog.length ? (ok ? 'ok' : 'bad') : 'none'}">${prog.length ? got : '–'}</td></tr>`;
   });
   h += '</tbody></table>';
-  if (t.asm.ram) h += `<p class="ttnote">늘 들어 있는 칸: ${ramTxt(t.asm.ram)} · 나머지 빈 칸은 0</p>`;
+  if (!vec && t.asm.ram) h += `<p class="ttnote">늘 들어 있는 칸: ${ramTxt(t.asm.ram)} · 나머지 빈 칸은 0</p>`;
+  if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();
   app.innerHTML = h;
   hookHints();
@@ -466,7 +512,7 @@ function renderAsm() {
 function checkAsm() {
   const t = cur.sub || cur.s;
   let bad = 0, loop = false;
-  t.asm.tests.forEach((x, k) => { const r = asmRun(cur.prog, ramOf(t, k)); if (r.err) loop = true; if (!testOk(x, r)) bad++; });
+  t.asm.tests.forEach((x, k) => { const r = machRun(t, cur.prog, k); if (r.err) loop = true; if (!machOk(t, x, r)) bad++; });
   if (!cur.prog.length) { cur.msg = '아직 줄이 없어요.'; return false; }
   if (bad) { cur.msg = `입력 ${t.asm.tests.length}개 중 ${bad}개가 달라요.${loop ? ' HLT까지 못 가고 계속 도는 것도 있어요.' : ''}`; return false; }
   return true;
@@ -476,13 +522,17 @@ function asmAction(a, t) {
   const prog = cur.prog, k = cur.asel;
   if (a === 'aop') {
     const at = k == null ? prog.length : k + 1;
-    changeProg(() => prog.splice(at, 0, { op: t.dataset.op, n: 0 }));
+    const vec = isVec(cur.sub || cur.s);
+    changeProg(() => prog.splice(at, 0, vec ? { op: t.dataset.op, a: VISA[t.dataset.op].args.map(() => 0) } : { op: t.dataset.op, n: 0 }));
     cur.asel = at;
   } else if (a === 'asel') {
     const j = +t.dataset.line;
     cur.asel = cur.asel === j ? null : j;
   } else if (a === 'ainc' || a === 'adec') {
-    changeProg(() => { prog[k].n = (prog[k].n + (a === 'ainc' ? 1 : 15)) % 16; });
+    if (isVec(cur.sub || cur.s)) {
+      const i = +t.dataset.i, R = VRANGE[VISA[prog[k].op].args[i]];
+      changeProg(() => { prog[k].a[i] = (prog[k].a[i] + (a === 'ainc' ? 1 : R - 1)) % R; });
+    } else changeProg(() => { prog[k].n = (prog[k].n + (a === 'ainc' ? 1 : 15)) % 16; });
   } else if (a === 'aup' || a === 'adown') {
     const j = a === 'aup' ? k - 1 : k + 1;
     changeProg(() => { [prog[k], prog[j]] = [prog[j], prog[k]]; });
@@ -492,13 +542,13 @@ function asmAction(a, t) {
     cur.asel = prog.length ? Math.min(k, prog.length - 1) : null;
   } else if (a === 'atest') {
     cur.tsel = +t.dataset.t;
-    cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+    cur.m = machInit(cur.sub || cur.s, cur.tsel);
   } else if (a === 'astep') {
-    asmStep(prog, cur.m);
+    machStep(cur.sub || cur.s, prog, cur.m);
   } else if (a === 'arun') {
-    while (!cur.m.halted && cur.m.steps < 2000) asmStep(prog, cur.m);
+    while (!cur.m.halted && cur.m.steps < 2000) machStep(cur.sub || cur.s, prog, cur.m);
   } else if (a === 'areset') {
-    cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+    cur.m = machInit(cur.sub || cur.s, cur.tsel);
   }
 }
 
@@ -569,7 +619,7 @@ function nearRandom(spec) {
 function near() {
   const s = cur.s, spec = specOf(), t = cur.sub || s;
   if (t.asm) {
-    const sol = parseProg(t.sol), keep = Math.max(1, sol.length - Math.ceil(sol.length / 3));
+    const sol = parseSol(t), keep = Math.max(1, sol.length - Math.ceil(sol.length / 3));
     changeProg(() => { cur.prog.splice(0, cur.prog.length, ...sol.slice(0, keep)); });
     cur.asel = null;
     cur.nearMsg = `앞 ${keep}줄을 놓았어요 — 나머지 ${sol.length - keep}줄을 이어 써요.`;
@@ -690,7 +740,7 @@ function tapTarget(t) {
       cur.prog = JSON.parse(cur.undo.pop());
       if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; persist(); }
       cur.asel = null; cur.msg = ''; cur.pass = false;
-      cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+      cur.m = machInit(cur.sub || cur.s, cur.tsel);
     } else if (a === 'reset' && (cur.sub || cur.s).asm) {
       changeProg(() => cur.prog.splice(0));
       cur.asel = null;
