@@ -62,6 +62,11 @@ button.warn { border-color: var(--x); color: var(--x); }
 .round { font-size: 14px; color: var(--mute); font-weight: 500; }
 details { margin: 6px 0; color: var(--mute); }
 summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
+.hints p { display: flex; gap: 8px; align-items: baseline; }
+.hints .hn { flex: none; width: 20px; height: 20px; line-height: 20px; border-radius: 50%; text-align: center; font-size: 12px; background: var(--card); border: 1px solid var(--line); color: var(--ink); }
+.hints button { margin: 6px 0 2px; }
+.hints .nearnote { display: block; font-size: 12px; }
+.hints .nearmsg { color: var(--ink); }
 .board { margin: 10px -16px 0; background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .board-svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
 .board-svg .bg { fill: transparent; }

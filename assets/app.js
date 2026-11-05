@@ -97,7 +97,7 @@ function openStage(i) {
   const s = STAGES[i];
   const v = rec(s.id);
   cur = {
-    i, s, sel: null, undo: [], msg: '', pass: false, round: 0, hintOpen: false,
+    i, s, sel: null, undo: [], msg: '', pass: false, round: 0, hintOpen: false, hintStep: 1, nearMsg: '',
     circ: !s.random && v.circ ? JSON.parse(JSON.stringify(v.circ)) : { parts: [], wires: {} },
     table: s.random ? randomTable(s.random) : null,
   };
@@ -263,7 +263,7 @@ function renderStage() {
     <h1>${s.title} <span class="kind k-${s.kind}">${s.kind}</span>${roundTxt}</h1>
     <p>${s.text}</p>
     ${s.only ? `<p class="rule">쓸 수 있는 부품: ${s.only.join(', ')}만</p>` : ''}
-    ${s.hint ? `<details ${cur.hintOpen ? 'open' : ''}><summary>힌트</summary><p>${s.hint}</p></details>` : ''}
+    ${hintBox(s)}
   </section>
   <div class="board">${boardSvg(spec, ev)}</div>
   <p class="status">${ev.cycle ? '<b>고리가 있어요</b> — 신호가 제자리로 돌아와서 값이 안 정해져요. 3부(기억)에서 이 고리를 일부러 써요. ' : ''}${statusText()}</p>
@@ -280,6 +280,79 @@ function renderStage() {
 
   const d = app.querySelector('details');
   if (d) d.addEventListener('toggle', () => { cur.hintOpen = d.open; });
+}
+
+// ---------- 힌트 ----------
+// 한 단계씩 연다. 글 힌트를 다 열면 「정답 가까이 놓기」.
+function hintBox(s) {
+  const hs = s.hints || [];
+  if (!hs.length) return '';
+  const shown = hs.slice(0, cur.hintStep);
+  let h = `<details class="hints" ${cur.hintOpen ? 'open' : ''}><summary>힌트 ${cur.nearMsg ? hs.length + 1 : cur.hintStep} / ${hs.length + 1}</summary>`;
+  h += shown.map((t, k) => `<p><span class="hn">${k + 1}</span>${t}</p>`).join('');
+  if (cur.hintStep < hs.length) h += `<button data-a="hintnext">다음 힌트</button>`;
+  else if (cur.nearMsg) h += `<p class="nearmsg">${cur.nearMsg}</p><button data-a="near">다시 놓기</button>`;
+  else h += `<button data-a="near">${hs.length + 1}. 정답 가까이 놓기</button><small class="nearnote">지금 판을 바꿔요 — 되돌리기로 돌아올 수 있어요</small>`;
+  return h + '</details>';
+}
+
+// sol 글('x=NAND(A,B); @0=x')을 판으로. 부품은 깊이(입력에서 몇 번째)대로 왼쪽→오른쪽 열에 놓는다.
+// 출력 선은 늘 비우고, keepLast가 false면 마지막 부품으로 들어가는 선도 비워 둔다.
+function solCircuit(sol, insNames, keepLast) {
+  const ids = {}, depth = {}, parts = [], wires = {}, outs = [];
+  insNames.forEach((n, i) => { ids[n] = 'in:' + i; });
+  for (const st of sol.split(';').map((x) => x.trim()).filter(Boolean)) {
+    let m = st.match(/^@(\d+)=(\w+)$/);
+    if (m) { outs.push(['out:' + m[1], m[2]]); continue; }
+    m = st.match(/^(\w+)=(\w+)\(([^)]*)\)$/);
+    const [, name, type, args] = m;
+    const id = 'p' + (parts.length + 1);
+    const srcs = args.split(',').map((a) => a.trim());
+    depth[name] = Math.max(0, ...srcs.map((a) => (a in depth ? depth[a] + 1 : 0)));
+    srcs.forEach((a, k) => { wires[id + ':' + k] = ids[a].startsWith('in:') ? ids[a] : ids[a] + ':0'; });
+    ids[name] = id;
+    parts.push({ id, type, d: depth[name] });
+  }
+  const used = new Set();
+  for (const p of parts) {
+    let col = Math.min(p.d, 2), row = 0;
+    while (used.has(row * 3 + col)) row++;
+    p.slot = row * 3 + col;
+    used.add(p.slot);
+    delete p.d;
+  }
+  let cut = outs.length; // 출력 선은 늘 비운다
+  if (!keepLast) {
+    const last = parts[parts.length - 1].id;
+    for (const k of Object.keys(wires)) if (k.startsWith(last + ':')) { delete wires[k]; cut++; }
+  }
+  return { circ: { parts, wires }, cut };
+}
+
+// 무작위 표: 1인 줄 하나의 「이 줄일 때만 1」 회로(0인 자리는 NOT, 전부 AND)를 놓아 준다.
+function nearRandom(spec) {
+  const n = spec.ins.length, r = cur.table.indexOf(1), bits = bitsOf(r, n);
+  const st = [], lits = [];
+  spec.ins.forEach((x, i) => { if (bits[i]) lits.push(x); else { st.push(`n${i}=NOT(${x})`); lits.push('n' + i); } });
+  let acc = lits[0];
+  for (let k = 1; k < lits.length; k++) { st.push(`a${k}=AND(${acc},${lits[k]})`); acc = 'a' + k; }
+  st.push('@0=' + acc);
+  const row = spec.ins.map((x, i) => `${x}=${bits[i]}`).join(', ');
+  return { ...solCircuit(st.join('; '), spec.ins, true), row };
+}
+
+function near() {
+  const s = cur.s, spec = specOf();
+  if (s.random) {
+    const { circ, row } = nearRandom(spec);
+    change((c) => { c.parts = circ.parts; c.wires = circ.wires; });
+    cur.nearMsg = `「${row}」 줄 하나를 놓았어요 — 출력에 이으면 그 줄만 맞아요. 1인 다른 줄도 같은 모양으로 만들어 OR로 모아요.`;
+  } else {
+    const { circ, cut } = solCircuit(s.sol, spec.ins, false);
+    change((c) => { c.parts = circ.parts; c.wires = circ.wires; });
+    cur.nearMsg = `부품을 다 놓았어요 — 남은 선 ${cut}개만 이으면 돼요.`;
+  }
+  cur.sel = null;
 }
 
 function check() {
@@ -375,12 +448,16 @@ function tapTarget(t) {
     } else if (a === 'share') {
       share(cur.share);
       return;
+    } else if (a === 'hintnext') {
+      cur.hintStep++; cur.hintOpen = true;
+    } else if (a === 'near') {
+      near();
     } else if (a === 'check') {
       check();
     } else if (a === 'round') {
       cur.table = randomTable(cur.s.random);
       cur.circ = { parts: [], wires: {} };
-      cur.undo = []; cur.pass = false; cur.msg = '';
+      cur.undo = []; cur.pass = false; cur.msg = ''; cur.nearMsg = '';
       cur.inVals = cur.inVals.map(() => 0);
       window.scrollTo(0, 0);
     }
