@@ -67,6 +67,8 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .hints button { margin: 6px 0 2px; }
 .hints .nearnote { display: block; font-size: 12px; }
 .hints .nearmsg { color: var(--ink); }
+.subq { padding: 8px 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); }
+.ttnote { font-size: 13px; color: var(--mute); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .board { margin: 10px -16px 0; background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .board-svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
 .board-svg .bg { fill: transparent; }

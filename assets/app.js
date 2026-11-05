@@ -90,7 +90,16 @@ function specOf() {
       expect: (vals) => [cur.table[vals.reduce((r, v) => r * 2 + v, 0)]],
     };
   }
-  return { ins: s.ins, outs: s.outs, expect: (vals) => s.fn(vals).map((v) => (v ? 1 : 0)) };
+  const t = cur.sub || s;
+  return { ins: t.ins, outs: t.outs, expect: (vals) => t.fn(vals).map((v) => (v ? 1 : 0)) };
+}
+
+// 매번 바뀌는 스테이지(무작위 표·앞 스테이지 뽑기)는 판을 저장하지 않는다
+const temp = (s) => !!(s.random || s.pool);
+// pool 시험: 앞 스테이지 하나를 뽑는다(바로 앞 문제와 다르게)
+function pickPool(s, prev) {
+  const ids = s.pool.filter((id) => !prev || id !== prev.id);
+  return STAGES[idxOf(ids[Math.floor(Math.random() * ids.length)])];
 }
 
 function openStage(i) {
@@ -98,8 +107,9 @@ function openStage(i) {
   const v = rec(s.id);
   cur = {
     i, s, sel: null, undo: [], msg: '', pass: false, round: 0, hintOpen: false, hintStep: 1, nearMsg: '',
-    circ: !s.random && v.circ ? JSON.parse(JSON.stringify(v.circ)) : { parts: [], wires: {} },
+    circ: !temp(s) && v.circ ? JSON.parse(JSON.stringify(v.circ)) : { parts: [], wires: {} },
     table: s.random ? randomTable(s.random) : null,
+    sub: s.pool ? pickPool(s) : null,
   };
   cur.inVals = specOf().ins.map(() => 0);
   renderStage();
@@ -112,7 +122,7 @@ function change(fn) {
   fn(cur.circ);
   cur.msg = '';
   cur.pass = false;
-  if (!cur.s.random) { rec(cur.s.id).circ = cur.circ; persist(); }
+  if (!temp(cur.s)) { rec(cur.s.id).circ = cur.circ; persist(); }
 }
 
 // ---------- 판 그리기 ----------
@@ -122,7 +132,11 @@ const IN_PORT = 58, OUT_PORT = 302;
 function geometry(spec) {
   const maxSlot = cur.circ.parts.reduce((m, p) => Math.max(m, p.slot), -1);
   const rows = Math.max(3, Math.floor(maxSlot / 3) + 2);
-  const H = Math.max(rows * ROWH, spec.ins.length * 56, spec.outs.length * 56) + 16;
+  const hOf = (t) => Math.max(PARTS[t].ins.length, PARTS[t].outs.length) * PS + 8;
+  const rowH = Array(rows).fill(ROWH);
+  cur.circ.parts.forEach((p) => { const r = Math.floor(p.slot / 3); rowH[r] = Math.max(rowH[r], hOf(p.type) + 20); });
+  const rowY = rowH.map((_, r) => 8 + rowH.slice(0, r).reduce((t, x) => t + x, 0));
+  const H = Math.max(rowY[rows - 1] + rowH[rows - 1], spec.ins.length * 56, spec.outs.length * 56) + 16;
   const pos = {};
   spec.ins.forEach((_, i) => { pos['in:' + i] = [IN_PORT, (H * (i + 1)) / (spec.ins.length + 1)]; });
   spec.outs.forEach((_, i) => { pos['out:' + i] = [OUT_PORT, (H * (i + 1)) / (spec.outs.length + 1)]; });
@@ -130,15 +144,15 @@ function geometry(spec) {
   cur.circ.parts.forEach((p) => {
     const def = PARTS[p.type];
     const cx = COLX[p.slot % 3];
-    const cy = 8 + ROWH * Math.floor(p.slot / 3) + ROWH / 2;
-    const h = Math.max(def.ins.length, def.outs.length) * PS + 8;
+    const r = Math.floor(p.slot / 3), cy = rowY[r] + rowH[r] / 2;
+    const h = hOf(p.type);
     box[p.id] = { cx, cy, h };
     def.ins.forEach((_, k) => { pos[p.id + ':' + k + ':i'] = [cx - BW / 2, cy - ((def.ins.length - 1) * PS) / 2 + k * PS]; });
     def.outs.forEach((_, k) => { pos[p.id + ':' + k + ':o'] = [cx + BW / 2, cy - ((def.outs.length - 1) * PS) / 2 + k * PS]; });
   });
   const srcPos = (key) => (key.startsWith('in:') ? pos[key] : pos[key + ':o']);
   const sinkPos = (key) => (key.startsWith('out:') ? pos[key] : pos[key + ':i']);
-  return { rows, H, box, srcPos, sinkPos };
+  return { rows, rowH, rowY, H, box, srcPos, sinkPos };
 }
 
 const cls = (v) => (v == null ? 'x' : v ? 'on' : 'off');
@@ -153,8 +167,8 @@ function boardSvg(spec, ev) {
     const used = new Set(cur.circ.parts.map((p) => p.slot));
     for (let k = 0; k < g.rows * 3; k++) {
       if (used.has(k)) continue;
-      const cx = COLX[k % 3], cy = 8 + ROWH * Math.floor(k / 3) + ROWH / 2;
-      s += `<rect x="${cx - 34}" y="${cy - 38}" width="68" height="76" rx="8" class="slot" data-k="slot" data-slot="${k}"/>`;
+      const cx = COLX[k % 3], r = Math.floor(k / 3);
+      s += `<rect x="${cx - 34}" y="${g.rowY[r] + 8}" width="68" height="${g.rowH[r] - 16}" rx="8" class="slot" data-k="slot" data-slot="${k}"/>`;
     }
   }
 
@@ -188,7 +202,7 @@ function boardSvg(spec, ev) {
 
   // 점은 맨 위에 — 손가락이 닿는 넓은 투명 원 + 보이는 작은 원
   cur.ports = [];
-  cur.rows = g.rows;
+  cur.rows = g.rows; cur.rowY = g.rowY; cur.rowH = g.rowH;
   const port = (k, key, [x, y], val) => {
     const on = sel && sel.t === k && sel.key === key;
     cur.ports.push({ t: k, key, x, y });
@@ -213,6 +227,7 @@ function statusText() {
   return '점선 빈 칸을 누르면 그리로 옮겨요.';
 }
 
+const TT_MAX = 16;
 function truthTable(spec) {
   const n = spec.ins.length, rows = 1 << n;
   const curRow = cur.inVals.reduce((r, v) => r * 2 + v, 0);
@@ -223,17 +238,31 @@ function truthTable(spec) {
   h += '</tr>';
   if (spec.outs.length > 1) h += `<tr class="sub"><th colspan="${n}"></th><th colspan="${spec.outs.length}" class="gap">원함</th><th colspan="${spec.outs.length}" class="gap">지금</th></tr>`;
   h += '</thead><tbody>';
+  const all = [];
   for (let r = 0; r < rows; r++) {
-    const vals = bitsOf(r, n);
-    const want = spec.expect(vals);
+    const vals = bitsOf(r, n), want = spec.expect(vals);
     const got = evaluate(cur.circ, vals, spec.outs.length).outs;
+    all.push({ r, vals, want, got, bad: got.some((v, k) => v !== want[k]) });
+  }
+  // 줄이 많으면(입력 다섯 이상) 16줄만 — 지금 줄, 틀린 줄을 먼저 채우고 나머지는 고르게
+  let show = all;
+  if (rows > TT_MAX && !cur.ttAll) {
+    const pick = new Set([curRow]);
+    for (const x of all) if (x.bad && x.got.some((v) => v != null) && pick.size < TT_MAX / 2) pick.add(x.r);
+    const step = rows / TT_MAX;
+    for (let off = 0; off < step && pick.size < TT_MAX; off++) for (let k = 0; k < TT_MAX && pick.size < TT_MAX; k++) pick.add(k * step + off);
+    show = all.filter((x) => pick.has(x.r));
+  }
+  for (const { r, vals, want, got } of show) {
     h += `<tr data-row="${r}" class="${r === curRow ? 'cur' : ''}">`;
     h += vals.map((v) => `<td>${v}</td>`).join('');
     h += want.map((v, k) => `<td class="want${k === 0 ? ' gap' : ''}">${v}</td>`).join('');
     h += got.map((v, k) => `<td class="${k === 0 ? 'gap ' : ''}${v == null ? 'none' : v === want[k] ? 'ok' : 'bad'}">${v == null ? '–' : v}</td>`).join('');
     h += '</tr>';
   }
-  return h + '</tbody></table>';
+  h += '</tbody></table>';
+  if (rows > TT_MAX) h += `<p class="ttnote">${cur.ttAll ? `${rows}줄 전부예요.` : `${rows}줄 중 ${TT_MAX}줄 — 틀린 줄을 먼저 보여요. 「확인」은 전부 봐요.`} <button data-a="ttall">${cur.ttAll ? '줄여 보기' : '전부 보기'}</button></p>`;
+  return h;
 }
 
 function renderStage() {
@@ -263,7 +292,8 @@ function renderStage() {
     <h1>${s.title} <span class="kind k-${s.kind}">${s.kind}</span>${roundTxt}</h1>
     <p>${s.text}</p>
     ${s.only ? `<p class="rule">쓸 수 있는 부품: ${s.only.join(', ')}만</p>` : ''}
-    ${hintBox(s)}
+    ${cur.sub ? `<p class="subq">이번 문제 · <b>${cur.sub.id} ${cur.sub.title}</b> — ${cur.sub.text}</p>` : ''}
+    ${hintBox(cur.sub || s)}
   </section>
   <div class="board">${boardSvg(spec, ev)}</div>
   <p class="status">${ev.cycle ? '<b>고리가 있어요</b> — 신호가 제자리로 돌아와서 값이 안 정해져요. 3부(기억)에서 이 고리를 일부러 써요. ' : ''}${statusText()}</p>
@@ -296,20 +326,20 @@ function hintBox(s) {
   return h + '</details>';
 }
 
-// sol 글('x=NAND(A,B); @0=x')을 판으로. 부품은 깊이(입력에서 몇 번째)대로 왼쪽→오른쪽 열에 놓는다.
+// sol 글('x=NAND(A,B); @0=x', 'h.1' = h의 둘째 출력)을 판으로. 부품은 깊이(입력에서 몇 번째)대로 왼쪽→오른쪽 열에 놓는다.
 // 출력 선은 늘 비우고, keepLast가 false면 마지막 부품으로 들어가는 선도 비워 둔다.
 function solCircuit(sol, insNames, keepLast) {
   const ids = {}, depth = {}, parts = [], wires = {}, outs = [];
   insNames.forEach((n, i) => { ids[n] = 'in:' + i; });
   for (const st of sol.split(';').map((x) => x.trim()).filter(Boolean)) {
-    let m = st.match(/^@(\d+)=(\w+)$/);
+    let m = st.match(/^@(\d+)=(.+)$/);
     if (m) { outs.push(['out:' + m[1], m[2]]); continue; }
-    m = st.match(/^(\w+)=(\w+)\(([^)]*)\)$/);
+    m = st.match(/^([^=]+)=([A-Z]+)\(([^)]*)\)$/);
     const [, name, type, args] = m;
     const id = 'p' + (parts.length + 1);
-    const srcs = args.split(',').map((a) => a.trim());
-    depth[name] = Math.max(0, ...srcs.map((a) => (a in depth ? depth[a] + 1 : 0)));
-    srcs.forEach((a, k) => { wires[id + ':' + k] = ids[a].startsWith('in:') ? ids[a] : ids[a] + ':0'; });
+    const srcs = args.split(',').map((a) => a.trim().split('.')); // 'h.1' = h의 둘째 출력
+    depth[name] = Math.max(0, ...srcs.map(([a]) => (a in depth ? depth[a] + 1 : 0)));
+    srcs.forEach(([a, k = '0'], j) => { wires[id + ':' + j] = ids[a].startsWith('in:') ? ids[a] : ids[a] + ':' + k; });
     ids[name] = id;
     parts.push({ id, type, d: depth[name] });
   }
@@ -348,7 +378,7 @@ function near() {
     change((c) => { c.parts = circ.parts; c.wires = circ.wires; });
     cur.nearMsg = `「${row}」 줄 하나를 놓았어요 — 출력에 이으면 그 줄만 맞아요. 1인 다른 줄도 같은 모양으로 만들어 OR로 모아요.`;
   } else {
-    const { circ, cut } = solCircuit(s.sol, spec.ins, false);
+    const { circ, cut } = solCircuit((cur.sub || s).sol, spec.ins, false);
     change((c) => { c.parts = circ.parts; c.wires = circ.wires; });
     cur.nearMsg = `부품을 다 놓았어요 — 남은 선 ${cut}개만 이으면 돼요.`;
   }
@@ -429,7 +459,7 @@ function tapTarget(t) {
   if (a) {
     if (a === 'undo' && cur.undo.length) {
       cur.circ = JSON.parse(cur.undo.pop());
-      if (!cur.s.random) { rec(cur.s.id).circ = cur.circ; persist(); }
+      if (!temp(cur.s)) { rec(cur.s.id).circ = cur.circ; persist(); }
       cur.sel = null; cur.msg = ''; cur.pass = false;
     } else if (a === 'del' && cur.sel && cur.sel.t === 'part') {
       const id = cur.sel.id;
@@ -448,6 +478,8 @@ function tapTarget(t) {
     } else if (a === 'share') {
       share(cur.share);
       return;
+    } else if (a === 'ttall') {
+      cur.ttAll = !cur.ttAll;
     } else if (a === 'hintnext') {
       cur.hintStep++; cur.hintOpen = true;
     } else if (a === 'near') {
@@ -455,10 +487,11 @@ function tapTarget(t) {
     } else if (a === 'check') {
       check();
     } else if (a === 'round') {
-      cur.table = randomTable(cur.s.random);
+      if (cur.s.random) cur.table = randomTable(cur.s.random);
+      if (cur.s.pool) { cur.sub = pickPool(cur.s, cur.sub); cur.hintStep = 1; cur.ttAll = false; }
       cur.circ = { parts: [], wires: {} };
       cur.undo = []; cur.pass = false; cur.msg = ''; cur.nearMsg = '';
-      cur.inVals = cur.inVals.map(() => 0);
+      cur.inVals = specOf().ins.map(() => 0);
       window.scrollTo(0, 0);
     }
     return renderStage();
@@ -491,7 +524,7 @@ function renderList() {
   const firstOpen = STAGES.findIndex((s, i) => unlocked(i) && !(save[s.id] || {}).solved);
   const solved = STAGES.filter((s) => (save[s.id] || {}).solved).length;
   let h = `<header class="hero"><h1>NAND 게임</h1><p>NAND 게이트 하나에서 시작해 GPU까지. 만든 부품은 다음 단계에서 상자 하나가 되고, 같은 개념을 여러 번 다르게 풀며 손에 익혀요.</p>
-  <p class="prog">${solved} / ${STAGES.length} 풂 · 지금 열린 건 1부${firstOpen >= 0 ? ` · <a href="#s/${STAGES[firstOpen].id}">이어서 ${STAGES[firstOpen].id} →</a>` : ''}</p></header>`;
+  <p class="prog">${solved} / ${STAGES.length} 풂 · 지금 열린 건 ${[...new Set(STAGES.map((x) => x.book))].join('·')}부${firstOpen >= 0 ? ` · <a href="#s/${STAGES[firstOpen].id}">이어서 ${STAGES[firstOpen].id} →</a>` : ''}</p></header>`;
   for (const bk of BOOKS) {
     const list = STAGES.filter((s) => s.book === bk.no);
     h += `<section class="book${list.length ? '' : ' soon'}"><h2><span class="bno">${bk.no}부</span> ${bk.name}</h2><p class="bdesc">${bk.desc}</p>`;
@@ -539,8 +572,10 @@ function nearestPort(t, x, y, max) {
 const slotAt = (x, y) => {
   let col = 0;
   COLX.forEach((cx, i) => { if (Math.abs(cx - x) < Math.abs(COLX[col] - x)) col = i; });
-  const row = Math.floor((y - 8) / ROWH);
-  return row < 0 || row >= cur.rows + 1 ? null : row * 3 + col;
+  if (y < 8) return null;
+  let row = cur.rowY.findIndex((ry, r) => y < ry + cur.rowH[r]);
+  if (row < 0) row = cur.rows; // 맨 아래 줄 밑 = 새 줄
+  return row * 3 + col;
 };
 
 app.addEventListener('pointerdown', (e) => {

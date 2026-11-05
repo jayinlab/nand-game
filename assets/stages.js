@@ -2,7 +2,7 @@
 // 반복 숙달이 목표라 부마다 세 종류가 섞인다:
 //   개념 — 새 부품을 처음 만든다. 풀면 그 부품이 다음 스테이지부터 상자 하나로 나온다.
 //   연습 — 같은 개념을 조건을 바꿔 다시(NAND만·적은 개수·표 보고 맞히기).
-//   시험 — 매번 새로 뽑는 표를 연달아 맞힌다. 다시 들어가면 다른 문제.
+//   시험 — 매번 새로 뽑는 표(random)나 앞 스테이지 하나(pool)를 연달아 맞힌다. 다시 들어가면 다른 문제.
 // hints는 차례로 하나씩 열린다. 다 열면 「정답 가까이 놓기」 — sol(이름=부품(입력,…); @출력번호=이름)의
 // 부품을 다 놓고, 출력 선과 마지막 부품으로 들어가는 선만 비워 둔다. 무작위 표는 app.js가 1인 줄 하나를 놓아 준다.
 
@@ -20,6 +20,10 @@ export const BOOKS = [
 ];
 
 const b = (x) => (x ? 1 : 0);
+const n2 = (h, l) => h * 2 + l;
+const bitsN = (v, n) => Array.from({ length: n }, (_, i) => (v >> (n - 1 - i)) & 1);
+// 1비트 ALU 칸: o1o0 = 00 AND · 01 OR · 10 덧셈 · 11 XOR. 올림은 늘 덧셈의 올림.
+const alu1 = (o1, o0, a, c, d) => [[a & c, a | c, a ^ c ^ d, a ^ c][o1 * 2 + o0], b(a + c + d >= 2)];
 
 // 부품. cost = NAND 몇 개 몫인지(별 두 개 기준에 쓴다).
 export const PARTS = {
@@ -32,6 +36,9 @@ export const PARTS = {
   XNOR: { ins: ['', ''], outs: [''], cost: 5, fn: ([a, c]) => [b(a === c)] },
   MUX: { ins: ['0', '1', 's'], outs: [''], cost: 4, fn: ([d0, d1, s]) => [s ? d1 : d0] },
   DEMUX: { ins: ['d', 's'], outs: ['0', '1'], cost: 5, fn: ([d, s]) => [b(d && !s), b(d && s)] },
+  HA: { ins: ['', ''], outs: ['s', 'c'], cost: 5, fn: ([a, c]) => [a ^ c, a & c] },
+  FA: { ins: ['', '', 'c'], outs: ['s', 'c'], cost: 9, fn: ([a, c, d]) => [a ^ c ^ d, b(a + c + d >= 2)] },
+  ALU: { ins: ['o1', 'o0', 'a', 'b', 'c'], outs: ['r', 'c'], cost: 30, fn: ([o1, o0, a, c, d]) => alu1(o1, o0, a, c, d) },
 };
 
 const AB = ['A', 'B'];
@@ -173,5 +180,150 @@ export const STAGES = [
     id: '1-20', book: 1, kind: '시험', title: '1부 시험', random: 3, rounds: 5,
     text: '입력 셋짜리 표 다섯을 연달아. 이걸 넘기면 2부(산술)로 가요.',
     hints: ['막히면 1-18의 방법: 1이 나오는 줄마다 AND, 전부 OR.', '1인 줄마다 「이 줄일 때만 1」을 AND로, 전부 OR로.'],
+  },
+  // ---------- 2부 산술 ----------
+  {
+    id: '2-1', book: 2, kind: '개념', title: '반가산기', unlock: 'HA',
+    text: '한 자리 이진수 둘을 더해요. 1+1=10 — 합 0, 올림 1. 상자로 쓰면 s가 합, c가 올림이에요.',
+    hints: ['합은 「둘이 다를 때 1」, 올림은 「둘 다 1」.', '별 두 개는 NAND 다섯 — 1-9의 XOR(NAND 넷) 안에 이미 NAND(A,B)가 있으니 그걸 NOT 하면 올림.'],
+    sol: 'n=NAND(A,B); x=NAND(A,n); z=NAND(B,n); s=NAND(x,z); c=NOT(n); @0=s; @1=c',
+    ins: AB, outs: ['합', '올림'], par: 5, fn: ([a, c]) => [a ^ c, a & c],
+  },
+  {
+    id: '2-2', book: 2, kind: '연습', title: '반가산기, NAND만으로', only: ['NAND'],
+    text: '반가산기를 NAND 다섯으로. 2부의 모든 덧셈이 이 다섯 개에서 나와요.',
+    hints: ['XOR는 NAND 넷(1-9). 그 첫 NAND를 하나 더 쓰면 올림.', '올림 = NAND(n, n) — n은 맨 처음 NAND(A,B).'],
+    sol: 'n=NAND(A,B); x=NAND(A,n); z=NAND(B,n); s=NAND(x,z); c=NAND(n,n); @0=s; @1=c',
+    ins: AB, outs: ['합', '올림'], par: 5, fn: ([a, c]) => [a ^ c, a & c],
+  },
+  {
+    id: '2-3', book: 2, kind: '개념', title: '전가산기', unlock: 'FA',
+    text: '세 자리(A·B·아랫자리에서 올라온 올림 Cin)를 더해요. 여러 자리 덧셈의 한 칸이에요. 상자로 쓰면 c 점이 Cin이에요.',
+    hints: ['반가산기 둘: 먼저 A+B, 그 합에 Cin을 더해요.', '두 반가산기의 올림 중 하나라도 1이면 올림 — OR. (둘이 같이 1이 되는 일은 없어요.)'],
+    sol: 'h=HA(A,B); k=HA(h,Cin); c=OR(h.1,k.1); @0=k; @1=c',
+    ins: ['A', 'B', 'Cin'], outs: ['합', '올림'], par: 13, fn: ([a, c, d]) => [a ^ c ^ d, b(a + c + d >= 2)],
+  },
+  {
+    id: '2-4', book: 2, kind: '연습', title: '셋의 홀짝',
+    text: '1이 홀수 개면 1. 전가산기의 「합」 칸만 떼어 본 거예요.',
+    hints: ['XOR는 「1이 홀수 개」를 묻는 게이트예요.', 'XOR(A,B)를 C와 다시 XOR.'],
+    sol: 'x=XOR(A,B); y=XOR(x,C); @0=y',
+    ins: ABC, outs: OUT, par: 8, fn: ([a, c, d]) => [a ^ c ^ d],
+  },
+  {
+    id: '2-5', book: 2, kind: '연습', title: '전가산기, NAND 아홉', only: ['NAND'],
+    text: '전가산기를 NAND만으로. 별 두 개는 NAND 9개.',
+    hints: ['A XOR B를 NAND 넷으로(1-9), 그 결과와 Cin을 또 NAND 넷으로 XOR.', '두 XOR의 첫 NAND — NAND(A,B)와 NAND(x,Cin) — 를 다시 NAND하면 올림. 모두 아홉.'],
+    sol: 'n=NAND(A,B); p=NAND(A,n); q=NAND(B,n); x=NAND(p,q); m=NAND(x,Cin); u=NAND(x,m); v=NAND(Cin,m); s=NAND(u,v); c=NAND(n,m); @0=s; @1=c',
+    ins: ['A', 'B', 'Cin'], outs: ['합', '올림'], par: 9, fn: ([a, c, d]) => [a ^ c ^ d, b(a + c + d >= 2)],
+  },
+  {
+    id: '2-6', book: 2, kind: '연습', title: '하나 더하기',
+    text: '두 자리 수 A1A0에 1을 더해요(S2S1S0). 3부의 카운터가 바로 이거예요.',
+    hints: ['반가산기에 B 대신 1을 넣은 셈 — 맨 아래 자리는 뒤집기, 그 올림은 A0.', 'S0 = NOT A0, S1 = A1 XOR A0, S2 = A1 AND A0.'],
+    sol: 'n=NOT(A0); x=XOR(A1,A0); c=AND(A1,A0); @0=c; @1=x; @2=n',
+    ins: ['A1', 'A0'], outs: ['S2', 'S1', 'S0'], par: 7, fn: ([a1, a0]) => bitsN(n2(a1, a0) + 1, 3),
+  },
+  {
+    id: '2-7', book: 2, kind: '개념', title: '두 자리 덧셈',
+    text: 'A1A0 + B1B0 = S2S1S0. 자리마다 한 칸씩, 올림은 윗자리로.',
+    hints: ['맨 아래 자리는 올림이 안 들어오니 반가산기, 윗자리는 전가산기.', '반가산기 올림(c) → 전가산기의 c 점. 전가산기의 올림이 S2.'],
+    sol: 'h=HA(A0,B0); f=FA(A1,B1,h.1); @0=f.1; @1=f; @2=h',
+    ins: ['A1', 'A0', 'B1', 'B0'], outs: ['S2', 'S1', 'S0'], par: 14,
+    fn: ([a1, a0, b1, b0]) => bitsN(n2(a1, a0) + n2(b1, b0), 3),
+  },
+  {
+    id: '2-8', book: 2, kind: '연습', title: '올림 받는 두 자리',
+    text: '맨 아래 자리에도 올림(Cin)이 들어와요. 이 칸을 줄줄이 이으면 4비트·16비트 가산기예요(폰 화면엔 두세 자리까지만).',
+    hints: ['이번엔 맨 아래도 셋을 더하니 전가산기 둘.', '아래 전가산기의 c 점 ← Cin, 그 올림 → 윗 전가산기 c 점.'],
+    sol: 'f=FA(A0,B0,Cin); g=FA(A1,B1,f.1); @0=g.1; @1=g; @2=f',
+    ins: ['A1', 'A0', 'B1', 'B0', 'Cin'], outs: ['S2', 'S1', 'S0'], par: 18,
+    fn: ([a1, a0, b1, b0, c]) => bitsN(n2(a1, a0) + n2(b1, b0) + c, 3),
+  },
+  {
+    id: '2-9', book: 2, kind: '연습', title: '세 자리 덧셈',
+    text: 'A2A1A0 + B2B1B0 = S3S2S1S0. 칸 하나를 더 이어요.',
+    hints: ['2-7에 전가산기 하나를 더 — 올림을 다음 칸으로 넘겨요.', '반가산기 → 전가산기 → 전가산기, 올림 점끼리 이어요. 마지막 올림이 S3.'],
+    sol: 'h=HA(A0,B0); f=FA(A1,B1,h.1); g=FA(A2,B2,f.1); @0=g.1; @1=g; @2=f; @3=h',
+    ins: ['A2', 'A1', 'A0', 'B2', 'B1', 'B0'], outs: ['S3', 'S2', 'S1', 'S0'], par: 23,
+    fn: ([a2, a1, a0, b2, b1, b0]) => bitsN(a2 * 4 + n2(a1, a0) + b2 * 4 + n2(b1, b0), 4),
+  },
+  {
+    id: '2-10', book: 2, kind: '개념', title: '음수 (2의 보수)',
+    text: '컴퓨터는 음수를 「뒤집고 1 더하기」로 나타내요(2의 보수). 두 자리라면 1(01)의 음수는 11 — 3이 아니라 −1로 읽어요. A1A0의 음수 −A를 만들어요(넘친 자리는 버려요).',
+    hints: ['표를 보면 N0은 A0 그대로예요.', 'N1은 A1과 A0이 다를 때 1 — XOR. N0은 A0에서 출력으로 바로 이어도 돼요.'],
+    sol: 'x=XOR(A1,A0); @0=x; @1=A0',
+    ins: ['A1', 'A0'], outs: ['N1', 'N0'], par: 4, fn: ([a1, a0]) => bitsN((4 - n2(a1, a0)) % 4, 2),
+  },
+  {
+    id: '2-11', book: 2, kind: '개념', title: '뒤집기 스위치',
+    text: '「빼기」가 1이면 B를 뒤집고, 0이면 그대로 보내요. 다음 스테이지에서 더하기를 빼기로 바꾸는 손잡이가 돼요.',
+    hints: ['표를 보면 익숙한 게이트예요.', 'XOR(B, 빼기).'],
+    sol: 'x=XOR(B,빼기); @0=x',
+    ins: ['B', '빼기'], outs: OUT, par: 4, fn: ([c, s]) => [c ^ s],
+  },
+  {
+    id: '2-12', book: 2, kind: '개념', title: '더하기·빼기',
+    text: 'A − B = A + (뒤집은 B) + 1. 뒤집기는 2-11 스위치, 「+1」은 맨 아래 전가산기 c 점에 「빼기」를 넣으면 돼요. 결과는 두 자리(넘친 자리는 버려요).',
+    hints: ['B1·B0을 각각 XOR(Bi, 빼기)로 통과시킨 뒤 2-8처럼 전가산기 둘.', '맨 아래 전가산기의 c 점 ← 「빼기」. 그 올림 → 윗 전가산기 c 점.'],
+    sol: 'x=XOR(B0,빼기); y=XOR(B1,빼기); f=FA(A0,x,빼기); g=FA(A1,y,f.1); @0=g; @1=f',
+    ins: ['빼기', 'A1', 'A0', 'B1', 'B0'], outs: ['S1', 'S0'], par: 26,
+    fn: ([s, a1, a0, b1, b0]) => bitsN((s ? n2(a1, a0) - n2(b1, b0) + 4 : n2(a1, a0) + n2(b1, b0)) & 3, 2),
+  },
+  {
+    id: '2-13', book: 2, kind: '개념', title: '0인가',
+    text: '네 자리가 모두 0이면 1. CPU가 「결과가 0이면 점프」할 때 보는 깃발(flag)이에요.',
+    hints: ['「하나라도 1」의 반대.', 'OR 둘로 둘씩 모은 뒤 NOR.'],
+    sol: 'x=OR(A3,A2); z=OR(A1,A0); y=NOR(x,z); @0=y',
+    ins: ['A3', 'A2', 'A1', 'A0'], outs: OUT, par: 10, fn: (v) => [b(v.every((x) => !x))],
+  },
+  {
+    id: '2-14', book: 2, kind: '개념', title: 'A가 B보다 작나',
+    text: 'A1A0 < B1B0이면 1. 윗자리부터 견줘도 되고, A − B를 해서 「빌려 왔나」(맨 위 올림이 0인가)를 봐도 돼요. CPU는 뒤쪽을 써요.',
+    hints: ['A − B = A + NOT B + 1에서 맨 위 올림이 0이면 A < B.', '아래 자리 올림 = A0 OR NOT B0 = NAND(NOT A0, B0). 윗자리는 FA(A1, NOT B1, 그 올림), 올림을 뒤집으면 끝.'],
+    sol: 'na=NOT(A0); c=NAND(na,B0); nb=NOT(B1); f=FA(A1,nb,c); y=NOT(f.1); @0=y',
+    ins: ['A1', 'A0', 'B1', 'B0'], outs: OUT, par: 13, fn: ([a1, a0, b1, b0]) => [b(n2(a1, a0) < n2(b1, b0))],
+  },
+  {
+    id: '2-15', book: 2, kind: '연습', title: 'A가 B 이상인가',
+    text: 'A1A0 ≥ B1B0이면 1. 방금 것의 반대예요.',
+    hints: ['2-14의 반대.', '2-14에서 마지막 NOT만 빼요 — 맨 위 올림이 그대로 답.'],
+    sol: 'na=NOT(A0); c=NAND(na,B0); nb=NOT(B1); f=FA(A1,nb,c); @0=f.1',
+    ins: ['A1', 'A0', 'B1', 'B0'], outs: OUT, par: 12, fn: ([a1, a0, b1, b0]) => [b(n2(a1, a0) >= n2(b1, b0))],
+  },
+  {
+    id: '2-16', book: 2, kind: '개념', title: '연산 고르기',
+    text: 'op가 0이면 A AND B, 1이면 A OR B. ALU는 「다 계산해 두고 고르기」예요.',
+    hints: ['둘 다 만들어 두고 선택기로.', 'MUX의 0 점 ← AND, 1 점 ← OR, s 점 ← op.'],
+    sol: 'x=AND(A,B); o=OR(A,B); m=MUX(x,o,op); @0=m',
+    ins: ['op', 'A', 'B'], outs: OUT, par: 9, fn: ([op, a, c]) => [op ? a | c : a & c],
+  },
+  {
+    id: '2-17', book: 2, kind: '개념', title: '1비트 ALU 칸', unlock: 'ALU',
+    text: 'o1·o0으로 연산을 골라요: 00 AND · 01 OR · 10 덧셈 · 11 XOR. 올림은 늘 덧셈의 올림을 내보내요. 이 칸을 자리마다 늘어놓으면 ALU예요.',
+    hints: ['넷을 다 만들고 선택기 셋으로 하나를 골라요 — o0로 둘씩, o1로 마지막.', 'MUX(AND, OR, o0) · MUX(덧셈 합, XOR, o0) · 그 둘을 MUX(…, o1). 올림은 전가산기의 c.'],
+    sol: 'f=FA(A,B,Cin); x=AND(A,B); o=OR(A,B); e=XOR(A,B); m=MUX(x,o,o0); n=MUX(f,e,o0); r=MUX(m,n,o1); @0=r; @1=f.1',
+    ins: ['o1', 'o0', 'A', 'B', 'Cin'], outs: ['결과', '올림'], par: 30,
+    fn: ([o1, o0, a, c, d]) => alu1(o1, o0, a, c, d),
+  },
+  {
+    id: '2-18', book: 2, kind: '개념', title: '두 자리 ALU',
+    text: 'ALU 칸 둘을 이어 두 자리 ALU를. 연산 선(o1·o0)은 두 칸에 똑같이, 올림은 아래 칸에서 윗칸으로. 맨 아래 c 점은 비워 두면 0이에요.',
+    hints: ['o1·o0을 두 칸 모두에. 아래 칸 A0·B0, 윗칸 A1·B1.', '아래 칸 올림(c) → 윗칸 c 점. 윗칸 올림이 C.'],
+    sol: 'u=ALU(o1,o0,A0,B0); v=ALU(o1,o0,A1,B1,u.1); @0=v.1; @1=v; @2=u',
+    ins: ['o1', 'o0', 'A1', 'A0', 'B1', 'B0'], outs: ['C', 'R1', 'R0'], par: 60,
+    fn: ([o1, o0, a1, a0, b1, b0]) => { const [r0, c0] = alu1(o1, o0, a0, b0, 0); const [r1, c1] = alu1(o1, o0, a1, b1, c0); return [c1, r1, r0]; },
+  },
+  {
+    id: '2-19', book: 2, kind: '연습', title: 'ALU에 0 깃발',
+    text: '두 자리 ALU에 「결과가 0인가」 깃발을 달아요. 4부 CPU가 점프할지 정할 때 이 깃발을 봐요.',
+    hints: ['2-18 그대로에 2-13의 생각을 한 번 더.', 'NOR(R1, R0)이 0 깃발.'],
+    sol: 'u=ALU(o1,o0,A0,B0); v=ALU(o1,o0,A1,B1,u.1); z=NOR(v,u); @0=v; @1=u; @2=z',
+    ins: ['o1', 'o0', 'A1', 'A0', 'B1', 'B0'], outs: ['R1', 'R0', '0인가'], par: 64,
+    fn: ([o1, o0, a1, a0, b1, b0]) => { const [r0, c0] = alu1(o1, o0, a0, b0, 0); const [r1] = alu1(o1, o0, a1, b1, c0); return [r1, r0, b(!r1 && !r0)]; },
+  },
+  {
+    id: '2-20', book: 2, kind: '시험', title: '2부 시험', pool: ['2-6', '2-7', '2-10', '2-12', '2-14', '2-16'], rounds: 4,
+    text: '2부에서 만든 회로 중 하나를 매번 뽑아요. 네 번 연달아. 넘기면 3부(기억)로 가요.',
   },
 ];
