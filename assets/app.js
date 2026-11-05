@@ -1,4 +1,4 @@
-import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN } from './stages.js';
+import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, SCHED_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN } from './stages.js';
 
 const app = document.getElementById('app');
 const SAVE = 'nand-game:v1';
@@ -402,7 +402,7 @@ function hookHints() {
 // 6부 작은 CU(cu)는 벡터 편집기를 같이 쓰고 기계만 다르다
 const isVec = (t) => !!t.asm.vec;
 const isCu = (t) => !!t.asm.cu;
-const machInit = (t, k) => (isCu(t) ? cuInit(t.asm, t.asm.tests[k] || {}) : isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
+const machInit = (t, k) => (isCu(t) ? cuInit(t.asm, t.asm.tests[k] || {}, cur.prog || []) : isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
 const machStep = (t, prog, m) => (isCu(t) ? cuStep(prog, m) : isVec(t) ? vecStep(prog, m) : asmStep(prog, m));
 const machRun = (t, prog, k) => (isCu(t) ? cuRun(prog, t.asm, t.asm.tests[k]) : isVec(t) ? vecRun(prog, t.asm, t.asm.tests[k]) : asmRun(prog, ramOf(t, k)));
 const machOk = (t, x, m) => (isCu(t) ? cuOk(x, m) : isVec(t) ? vecOk(x, m) : testOk(x, m));
@@ -464,7 +464,7 @@ function renderAsm() {
   h += `<div class="tools"><button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button><button data-a="reset" ${prog.length ? '' : 'disabled'}>처음부터</button></div>`;
   h += `<div class="palette${vec ? ' vpal' : ''}">${t.asm.ops.map((o) => `<button data-a="aop" data-op="${o}" ${prog.length >= 16 ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
   h += vec
-    ? `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VISA[o].args.join(', ')}</dt><dd>${VISA[o].desc} <small>실제: ${VISA[o].real}</small></dd>`).join('')}</dl><p class="ttnote">v = v0~v3(레인마다) · s = s0~s3(웨이브에 하나) · vs = 둘 중 아무거나 · n = 수 · k = 줄 번호</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VEC_NOTE}${isCu(t) ? `</p><p class="ttnote">${CU_NOTE}` : ''}</p></details>`
+    ? `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VISA[o].args.join(', ')}</dt><dd>${VISA[o].desc} <small>실제: ${VISA[o].real}</small></dd>`).join('')}</dl><p class="ttnote">v = v0~v3(레인마다) · s = s0~s3(웨이브에 하나) · vs = 둘 중 아무거나 · n = 수 · k = 줄 번호</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VEC_NOTE}${isCu(t) ? `</p><p class="ttnote">${CU_NOTE}` : ''}${t.asm.sched ? `</p><p class="ttnote">${SCHED_NOTE}` : ''}</p></details>`
     : `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o}${ISA[o].arg ? ' ' + ISA[o].arg : ''}</dt><dd>${ISA[o].desc} <small>기계어 ${ISA[o].code.toString(16).toUpperCase()}_</small></dd>`).join('')}</dl></details>`;
   h += `<p class="cost">${prog.length}줄${s.par ? ` · 별 두 개는 ${s.par}줄 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''} · 최대 16줄</p></div>`;
 
@@ -474,10 +474,14 @@ function renderAsm() {
   const state = m.halted ? `멈춤 · ${m.steps}걸음` : m.steps >= 2000 ? '안 멈춰요' : m.steps ? `${m.steps}걸음` : '처음';
   if (isCu(t)) {
     const cst = m.halted ? `끝 · ${m.t}사이클` : m.steps >= 2000 ? "안 멈춰요" : m.t ? `${m.t}사이클` : '처음';
-    h += `<div class="regs"><span>${cst}</span><span>오는 중 <b>${m.pending.length}</b></span></div>`;
+    const A = t.asm, many = m.waves.length > 2, multi = (A.wgs || 1) > 1 || (A.cus || 1) > 1;
+    h += `<div class="regs"><span>${cst}</span><span>오는 중 <b>${m.pending.length}</b></span>${A.waves > 1 || multi ? `<span>CU가 논 사이클 <b>${m.idle}</b></span>` : ''}</div>`;
+    if (A.vgprs) h += `<p class="wavehd">웨이브당 VGPR <b>${m.used}</b>개 → CU마다 동시에 <b>${m.cap}</b>웨이브 (레인당 ${A.vgprs}칸)</p>`;
     for (const w of m.waves) {
-      const st = w.halted ? '끝' : w.wait === 'cnt' ? '읽기 기다림' : w.wait === 'bar' ? '배리어' : m.cur === w.w ? '도는 중' : '쉬는 중';
-      h += `<p class="wavehd">${m.waves.length > 1 ? `웨이브 ${w.w} · ` : ''}PC ${w.pc} · ${st} · ${w.s.map((x, k) => `s${k}=${x}`).join(' ')}</p>`;
+      const st = w.halted ? '끝' : !w.live ? '아직 못 올라옴' : w.wait === 'cnt' ? '읽기 기다림' : w.wait === 'bar' ? '배리어' : m.cur[w.cu] === w.id ? '도는 중' : '쉬는 중';
+      const name = multi ? `WG ${w.wg}${A.waves > 1 ? `·웨이브 ${w.w}` : ''} · CU ${w.cu} · ` : m.waves.length > 1 ? `웨이브 ${w.w} · ` : '';
+      h += `<p class="wavehd">${name}PC ${w.pc} · ${st} · ${w.s.map((x, k) => `s${k}=${x}`).join(' ')}</p>`;
+      if (many) continue; // 웨이브가 많으면 한 줄씩만
       h += '<table class="lanes"><thead><tr><th>id</th><th>EXEC</th><th>VCC</th><th>v1</th><th>v2</th><th>v3</th></tr></thead><tbody>';
       for (let l = 0; l < LANES; l++) {
         const on = (w.exec >> l) & 1;
@@ -487,7 +491,7 @@ function renderAsm() {
     }
     const x0 = t.asm.tests[cur.tsel] || {}, init = Array.from({ length: MEMN }, (_, i) => (x0.mem && x0.mem[i]) || 0), wantM = (x0.want || {}).mem || {};
     h += '<p class="wavehd">기억</p><div class="ram">' + m.mem.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}${k in wantM ? ' goal' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
-    if (t.asm.ops.some((o) => o.startsWith('DS_'))) h += '<p class="wavehd">LDS</p><div class="ram">' + m.lds.map((x, k) => `<div class="cell${x ? ' chg' : ''}"><small>${k}</small>${x}</div>`).join('') + '</div>';
+    if (t.asm.ops.some((o) => o.startsWith('DS_'))) h += '<p class="wavehd">LDS</p><div class="ram">' + m.lds[0].map((x, k) => `<div class="cell${x ? ' chg' : ''}"><small>${k}</small>${x}</div>`).join('') + '</div>';
   } else if (vec) {
     h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>SCC <b>${m.scc}</b></span><span>${state}</span></div>`;
     h += '<table class="lanes"><thead><tr><th>레인</th><th>EXEC</th><th>VCC</th><th>v0</th><th>v1</th><th>v2</th><th>v3</th></tr></thead><tbody>';
@@ -528,7 +532,7 @@ function renderAsm() {
   });
   h += '</tbody></table>';
   if (!vec && t.asm.ram) h += `<p class="ttnote">늘 들어 있는 칸: ${ramTxt(t.asm.ram)} · 나머지 빈 칸은 0</p>`;
-  if (isCu(t)) h += `<p class="ttnote">처음엔 v0 = 작업 번호${(t.asm.waves || 1) > 1 ? '(웨이브 둘: 0~7)' : ''}, 적지 않은 칸·레지스터는 0 · 한 줄 = 한 사이클 · 굵은 테두리 칸이 답을 볼 칸</p>`;
+  if (isCu(t)) h += `<p class="ttnote">처음엔 v0 = ${(t.asm.wgs || 1) > 1 ? '워크그룹 안 작업 번호' : '작업 번호'}${(t.asm.waves || 1) > 1 ? `(웨이브 ${t.asm.waves}: 0~${t.asm.waves * 4 - 1})` : ''}${t.asm.wgReg != null ? ` · s${t.asm.wgReg} = 워크그룹 번호` : ''}, 적지 않은 칸·레지스터는 0 · 한 줄 = 한 사이클 · 굵은 테두리 칸이 답을 볼 칸</p>`;
   else if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();
   app.innerHTML = h;

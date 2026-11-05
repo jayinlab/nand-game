@@ -160,6 +160,9 @@ export const VISA = {
   DS_ADD: { args: ['v', 'v'], real: 'ds_add_u32', desc: 'LDS[vA] += vS — 같은 칸이어도 안 잃어요' },
   S_WAITCNT: { args: [], real: 's_waitcnt vmcnt(0) lgkmcnt(0)', desc: '오는 중인 읽기가 다 올 때까지 기다려요' },
   S_BARRIER: { args: [], real: 's_barrier', desc: '워크그룹의 웨이브가 모두 여기 올 때까지 기다려요' },
+  // 7부
+  S_MULI: { args: ['s', 's', 'n'], real: 's_mul_i32', desc: 'sD ← sA × n' },
+  S_LOADS: { args: ['s', 's', 'n'], real: 's_load_dword sD, s[B:B+1], 바이트 오프셋', desc: 'sD ← 기억[sB + n] — 늦게 와요(실제 오프셋은 바이트)' },
 };
 // 'V_ADD v1, s0, v1' → { op, a: [1, 4, 1] }
 export const parseVec = (t) => t.split(';').map((x) => x.trim()).filter(Boolean).map((x) => {
@@ -168,17 +171,43 @@ export const parseVec = (t) => t.split(';').map((x) => x.trim()).filter(Boolean)
 });
 // ---------- 6부: 작은 CU — 웨이브 1~2개, 기억 32칸, LDS 16칸, 사이클 ----------
 export const MEMN = 32, LDSN = 16, LINE = 4, CACHE_LINES = 4;
+export const SCHED_NOTE = '7부는 스케줄도 단순화했어요. 게임은 실제의 SIMD별 자원과 스케줄을 CU 하나로 뭉뚱그려요. CU마다 웨이브 자리는 넷, VGPR은 레인마다 8칸이라, 웨이브당 VGPR을 k개 쓰면 동시에 올라가는 수는 min(4, ⌊8 ÷ k⌋)예요(k = 쓴 가장 큰 v 번호 + 1). 실제 RDNA에서는 VGPR 할당량(번호 범위와 할당 단위로 정해져요)·LDS 사용량·웨이브 자리·워크그룹 크기 등이 함께 동시 상주 수를 제한하고, SGPR은 웨이브마다 고정으로 할당돼요. 워크그룹은 통째로 한 CU에 올라가요 — 실제 RDNA는 CU 모드면 한 CU 안에, WGP 모드면 한 WGP(CU 둘) 안에 놓고, WGP 모드에선 한 워크그룹의 웨이브가 그 안의 CU 둘에 나뉠 수도 있어요. 게임은 워크그룹 번호 순서대로 CU에 번갈아 나누는데, 실제 배치는 하드웨어 디스패처가 정해요. 커널 인자 주소를 s0에, 워크그룹 번호를 s3에 넣는 건 게임 규칙이에요 — LLVM AMDHSA ABI에서는 kernel descriptor에서 켠 kernarg 주소를 user SGPR 두 개로, 워크그룹 좌표를 system SGPR로 받고, 정확한 위치는 켠 항목에 따라 달라요. 게임은 배열 주소도 8비트 한 칸으로 줄이고 인자 번호 n을 그대로 오프셋으로 써요 — 실제 AMDHSA의 64비트 배열 포인터는 보통 s_load_dwordx2로 읽고, 오프셋은 인자의 크기·정렬에 따른 바이트 위치예요(64비트 포인터 둘이면 0·8). 캐시는 모든 CU가 하나를 같이 써요(실제는 CU 가까운 캐시와 같이 쓰는 L2가 따로 있어요).';
 export const CU_NOTE = '이 게임은 메모리를 많이 단순화했어요. 실제 dword·b32·u32 명령은 32비트 데이터 하나를 다루지만, 게임에선 8비트 한 칸으로 줄였어요(덧셈은 원자 덧셈까지 하위 8비트만 남아요). 기억은 32칸이고 주소는 칸 번호예요 — 실제 32비트 배열의 i번째 원소는 보통 「기준 바이트 주소 + 4×i」인데, 게임은 기준 주소와 ×4를 생략해요. LDS(16칸)도 같아요. 게임에선 같은 메모리 명령에서 같은 네 칸 줄을 읽는 레인들의 요청을 하나로 묶어요. 실제 coalescing도 여러 레인의 요청을 필요한 메모리 트랜잭션으로 모으지만, 캐시 줄 하나가 언제나 전송 한 번과 같지는 않아요. 캐시는 최근 네 줄만 기억하고, 먼저 요청한 줄은 뒤 읽기가 다시 써요(줄이 아직 오는 중이면 도착을 기다려요). 사이클 수(읽기 지연 10, 줄마다 8, 캐시면 4, LDS 읽기 2, 스칼라 읽기 6)는 지어낸 수예요 — 실제 캐시 계층과 지연은 훨씬 복잡해요. 게임의 S_WAITCNT는 모든 읽기를 한꺼번에 기다려요. 실제 RDNA2에선 전역 읽기는 vmcnt, 스칼라 읽기와 LDS 읽기·쓰기·원자 연산은 lgkmcnt로 기다리고, 전역 쓰기와 반환값 없는 전역 원자 연산은 따로 s_waitcnt_vscnt null, 0으로 기다려요. 게임에선 쓰기(G_STORE·DS_WRITE)와 원자 연산이 바로 끝나요. 레인 여럿이 G_STORE로 같은 칸에 쓰면 어느 레인 값이 남을지 정해져 있지 않은데, 게임에선 뒤 레인이 남아요. 게임에선 한 번에 한 웨이브의 명령을 사이클마다 하나씩 실행하고, 기다리거나 끝나면 다른 웨이브로 넘어가요 — 실제 RDNA는 여러 웨이브의 명령 발행을 섞을 수 있어요. v0에도 게임이 작업 번호(웨이브 × 4 + 레인)를 미리 넣어 줘요. 둘 다 실제 스케줄·초기 레지스터 상태를 단순화한 규칙이에요.';
-const MEMOPS = new Set(['G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'DS_WRITE', 'DS_READ', 'DS_ADD', 'S_WAITCNT', 'S_BARRIER']);
-export function cuInit(asm, x) {
-  const W = asm.waves || 1;
-  const waves = Array.from({ length: W }, (_, w) => {
+const MEMOPS = new Set(['G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'S_LOADS', 'DS_WRITE', 'DS_READ', 'DS_ADD', 'S_WAITCNT', 'S_BARRIER']);
+// 웨이브 하나가 쓰는 VGPR 수 = 프로그램에 나온 가장 큰 v 번호 + 1 (v0은 늘 씀)
+export function vgprsUsed(prog) {
+  let mx = 0;
+  for (const l of prog) VISA[l.op].args.forEach((k, i) => { if (k === 'v' || (k === 'vs' && l.a[i] < 4)) mx = Math.max(mx, l.a[i]); });
+  return mx + 1;
+}
+// asm: waves(워크그룹당 웨이브) · wgs(워크그룹 수) · cus(CU 수) · vgprs(CU의 레인당 VGPR 칸, 없으면 넉넉) · wgReg(워크그룹 번호를 넣을 s)
+export function cuInit(asm, x, prog = []) {
+  const W = asm.waves || 1, G = asm.wgs || 1, C = asm.cus || 1;
+  const waves = [];
+  for (let g = 0; g < G; g++) for (let w = 0; w < W; w++) {
     const m = vecInit({ ...asm, v: null }, { ...x, v: null });
-    m.v[0] = m.v[0].map((_, l) => w * LANES + l); // v0 = 작업 번호(단순화)
-    return Object.assign(m, { w, wait: null, pend: 0 });
-  });
+    m.v[0] = m.v[0].map((_, l) => w * LANES + l); // v0 = 워크그룹 안 작업 번호(단순화)
+    if (asm.wgReg != null) m.s[asm.wgReg] = g;
+    waves.push(Object.assign(m, { id: waves.length, w, wg: g, cu: g % C, wait: null, pend: 0, live: false }));
+  }
+  const used = vgprsUsed(prog);
+  const cap = Math.max(1, Math.min(4, Math.floor((asm.vgprs || 99) / used))); // CU마다 동시에 올라가는 웨이브(슬롯 4)
   const mem = Array.from({ length: MEMN }, (_, i) => (x.mem && x.mem[i]) || 0);
-  return { t: 0, waves, cur: 0, mem, lds: Array(LDSN).fill(0), cache: [], memFree: 0, pending: [], halted: false, steps: 0 };
+  const m = { t: 0, waves, cus: C, cap, used, cur: Array(C).fill(-1), mem, lds: Array.from({ length: G }, () => Array(LDSN).fill(0)), cache: [], memFree: 0, pending: [], halted: false, steps: 0, idle: 0 };
+  cuLaunch(m);
+  return m;
+}
+// 자리가 나면 워크그룹을 통째로 CU에 올린다(워크그룹은 한 CU에 같이 있어야 배리어·LDS를 나눠요)
+function cuLaunch(m) {
+  for (let c = 0; c < m.cus; c++) {
+    let live = m.waves.filter((w) => w.cu === c && w.live && !w.halted).length;
+    for (let g = 0; g < m.lds.length; g++) {
+      const ws = m.waves.filter((w) => w.wg === g && w.cu === c);
+      if (!ws.length || ws[0].live) continue;
+      if (live + ws.length > m.cap && live > 0) break; // 차례대로: 앞 워크그룹이 못 올라가면 기다림
+      ws.forEach((w) => { w.live = true; }); live += ws.length;
+    }
+  }
 }
 function cuLoadLatency(m, addrs) {
   // 캐시 = 최근 네 줄과 그 줄이 도착하는 사이클. 먼저 요청한 줄을 뒤 읽기가 다시 쓰되, 줄이 도착하기 전엔 못 끝나요
@@ -206,13 +235,14 @@ function cuExec(prog, m, w) {
   if (op === 'G_LOAD') {
     const ad = act.map((l) => addr(l) % MEMN);
     const vals = act.map((l, i) => m.mem[ad[i]]);
-    m.pending.push({ w: w.w, reg: a[0], lanes: act, vals, ready: act.length ? cuLoadLatency(m, ad) : m.t + 1 }); w.pend++;
+    m.pending.push({ w: w.id, reg: a[0], lanes: act, vals, ready: act.length ? cuLoadLatency(m, ad) : m.t + 1 }); w.pend++;
   } else if (op === 'G_STORE') for (const l of act) m.mem[addr(l) % MEMN] = w.v[a[1]][l]; // 같은 칸이면 뒤 레인이 남음(단순화)
   else if (op === 'G_ATOMIC_ADD') for (const l of act) { const i = addr(l) % MEMN; m.mem[i] = (m.mem[i] + w.v[a[1]][l]) & 255; }
-  else if (op === 'S_LOAD') { m.pending.push({ w: w.w, sreg: a[0], val: m.mem[a[1] % MEMN], ready: m.t + 6 }); w.pend++; }
-  else if (op === 'DS_WRITE') for (const l of act) m.lds[addr(l) % LDSN] = w.v[a[1]][l];
-  else if (op === 'DS_ADD') for (const l of act) { const i = addr(l) % LDSN; m.lds[i] = (m.lds[i] + w.v[a[1]][l]) & 255; }
-  else if (op === 'DS_READ') { m.pending.push({ w: w.w, reg: a[0], lanes: act, vals: act.map((l) => m.lds[addr(l) % LDSN]), ready: m.t + 2 }); w.pend++; }
+  else if (op === 'S_LOAD') { m.pending.push({ w: w.id, sreg: a[0], val: m.mem[a[1] % MEMN], ready: m.t + 6 }); w.pend++; }
+  else if (op === 'S_LOADS') { m.pending.push({ w: w.id, sreg: a[0], val: m.mem[(w.s[a[1]] + a[2]) % MEMN], ready: m.t + 6 }); w.pend++; }
+  else if (op === 'DS_WRITE') { const L = m.lds[w.wg]; for (const l of act) L[addr(l) % LDSN] = w.v[a[1]][l]; }
+  else if (op === 'DS_ADD') { const L = m.lds[w.wg]; for (const l of act) { const i = addr(l) % LDSN; L[i] = (L[i] + w.v[a[1]][l]) & 255; } }
+  else if (op === 'DS_READ') { const L = m.lds[w.wg]; m.pending.push({ w: w.id, reg: a[0], lanes: act, vals: act.map((l) => L[addr(l) % LDSN]), ready: m.t + 2 }); w.pend++; }
   else if (op === 'S_WAITCNT') { if (w.pend) w.wait = 'cnt'; }
   else if (op === 'S_BARRIER') w.wait = 'bar';
   w.pc++; w.steps++;
@@ -227,22 +257,32 @@ export function cuStep(prog, m) {
   }
   m.pending = m.pending.filter((p) => p.ready > m.t);
   for (const w of m.waves) if (w.wait === 'cnt' && !w.pend) w.wait = null;
-  const live = m.waves.filter((w) => !w.halted);
-  if (live.length && live.every((w) => w.wait === 'bar')) live.forEach((w) => { w.wait = null; });
-  if (!live.length && !m.pending.length) { m.halted = true; return m; }
-  const W = m.waves.length;
-  for (let k = 0; k < W; k++) {
-    const w = m.waves[(m.cur + k) % W];
-    if (w.halted || w.wait) continue;
-    m.cur = w.w; // 멈출 때까지 같은 웨이브
-    if (w.pc >= prog.length) w.halted = true; else cuExec(prog, m, w);
-    break;
+  for (let g = 0; g < m.lds.length; g++) { // 배리어는 워크그룹마다
+    const ws = m.waves.filter((w) => w.wg === g && !w.halted);
+    if (ws.length && ws.every((w) => w.wait === 'bar')) ws.forEach((w) => { w.wait = null; });
+  }
+  cuLaunch(m);
+  if (m.waves.every((w) => w.halted) && !m.pending.length) { m.halted = true; return m; }
+  for (let c = 0; c < m.cus; c++) { // CU마다 한 사이클에 한 줄
+    const mine = m.waves.filter((w) => w.cu === c && w.live && !w.halted);
+    if (!mine.length) continue;
+    const start = Math.max(0, mine.findIndex((w) => w.id === m.cur[c]));
+    let ran = false;
+    for (let k = 0; k < mine.length; k++) {
+      const w = mine[(start + k) % mine.length];
+      if (w.wait) continue;
+      m.cur[c] = w.id; // 멈출 때까지 같은 웨이브
+      if (w.pc >= prog.length) w.halted = true; else cuExec(prog, m, w);
+      ran = true;
+      break;
+    }
+    if (!ran) m.idle++;
   }
   m.t++; m.steps++;
   return m;
 }
 export function cuRun(prog, asm, x, limit = 3000) {
-  const m = cuInit(asm, x);
+  const m = cuInit(asm, x, prog);
   while (!m.halted && m.t < limit) cuStep(prog, m);
   if (!m.halted) m.err = 'loop';
   return m;
@@ -283,6 +323,7 @@ export function vecStep(prog, m) {
   else if (op === 'S_MOVI') m.s[a[0]] = a[1];
   else if (op === 'S_ADDI') m.s[a[0]] = (m.s[a[0]] + a[1]) & 255;
   else if (op === 'S_CMP_EQ') m.scc = m.s[a[0]] === m.s[a[1]] ? 1 : 0;
+  else if (op === 'S_MULI') m.s[a[0]] = (m.s[a[1]] * a[2]) & 255;
   else if (op === 'S_GETEXEC') m.s[a[0]] = m.exec;
   else if (op === 'S_SAVEEXEC') { m.s[a[0]] = m.exec; m.exec &= m.vcc; }
   else if (op === 'S_XOREXEC') m.exec = (m.exec ^ m.s[a[0]]) & 15;
@@ -1121,5 +1162,45 @@ export const STAGES = [
   {
     id: '6-13', book: 6, kind: '시험', title: '6부 시험', pool: ['6-3', '6-8', '6-10', '6-11'], rounds: 3,
     text: '6부의 메모리 프로그램 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 7부(CU·스케줄)로 가요.',
+  },
+  // ---------- 7부 CU·스케줄 ----------
+  {
+    id: '7-1', book: 7, kind: '개념', title: '지연 숨기기',
+    text: '워크그룹 하나에 웨이브 넷(작업 0~15). 레인마다 기억[id]의 두 배를 기억[16 + id]에. 웨이브 하나가 읽기를 기다리는 동안 CU는 다른 웨이브를 돌려요 — 6-2에선 20사이클 중 대부분 놀았는데, 일이 네 배인 이번엔 몇 사이클일까요? 「CU가 논 사이클」도 보세요. s0 = 16.',
+    hints: ['6-2와 같은 모양에 두 배 하기만 더해요. 웨이브 넷이 같은 프로그램을 돌아요.', 'G_LOAD v1, v0 · V_ADD v2, s0, v0 · S_WAITCNT · V_ADD v1, v1, v1 · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, sched: true, waves: 4, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_LOADS', 'S_MULI', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 16 }, tests: [{ mem: { 0: 3, 1: 10, 2: 17, 3: 24, 4: 31, 5: 38, 6: 45, 7: 2, 8: 9, 9: 16, 10: 23, 11: 30, 12: 37, 13: 44, 14: 1, 15: 8 }, want: { mem: { 16: 6, 17: 20, 18: 34, 19: 48, 20: 62, 21: 76, 22: 90, 23: 4, 24: 18, 25: 32, 26: 46, 27: 60, 28: 74, 29: 88, 30: 2, 31: 16 } } }] },
+    sol: 'G_LOAD v1, v0; V_ADD v2, s0, v0; S_WAITCNT; V_ADD v1, v1, v1; G_STORE v2, v1; S_ENDPGM', par: 6,
+  },
+  {
+    id: '7-2', book: 7, kind: '개념', title: '워크그룹 나누기',
+    text: '이번엔 워크그룹 넷(웨이브 하나씩), CU 둘. 워크그룹은 CU에 나눠 올라가고(0·2는 CU 0, 1·3은 CU 1), 두 CU가 같이 돌아요. v0은 워크그룹 안 번호(0~3)라, 전체 번호 = 워크그룹 번호 × 4 + v0. 워크그룹 번호는 s3에 들어 있어요(실제로도 시스템 SGPR로 들어와요). 기억[id]의 두 배를 기억[16 + id]에. 다 끝난 사이클 수를 보면 CU 하나일 때보다 별로 안 줄어요 — 게임에선 모든 CU가 기억 길 하나를 차례로 써서 그래요. 실제로도 같이 쓰는 메모리 대역폭이 이미 가득 찬 일은 CU를 늘려도 그만큼 빨라지지 않아요. s0 = 16.',
+    hints: ['먼저 S_MULI로 워크그룹 번호 × 4, 그걸 v0에 더해 전체 번호.', 'S_MULI s1, s3, 4 · V_ADD v1, s1, v0 · G_LOAD v2, v1 · V_ADD v1, s0, v1 · S_WAITCNT · V_ADD v2, v2, v2 · G_STORE v1, v2 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, sched: true, wgs: 4, cus: 2, wgReg: 3, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_LOADS', 'S_MULI', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 16 }, tests: [{ mem: { 0: 3, 1: 10, 2: 17, 3: 24, 4: 31, 5: 38, 6: 45, 7: 2, 8: 9, 9: 16, 10: 23, 11: 30, 12: 37, 13: 44, 14: 1, 15: 8 }, want: { mem: { 16: 6, 17: 20, 18: 34, 19: 48, 20: 62, 21: 76, 22: 90, 23: 4, 24: 18, 25: 32, 26: 46, 27: 60, 28: 74, 29: 88, 30: 2, 31: 16 } } }, { mem: { 0: 1, 1: 14, 2: 27, 3: 40, 4: 53, 5: 66, 6: 79, 7: 92, 8: 5, 9: 18, 10: 31, 11: 44, 12: 57, 13: 70, 14: 83, 15: 96 }, want: { mem: { 16: 2, 17: 28, 18: 54, 19: 80, 20: 106, 21: 132, 22: 158, 23: 184, 24: 10, 25: 36, 26: 62, 27: 88, 28: 114, 29: 140, 30: 166, 31: 192 } } }] },
+    sol: 'S_MULI s1, s3, 4; V_ADD v1, s1, v0; G_LOAD v2, v1; V_ADD v1, s0, v1; S_WAITCNT; V_ADD v2, v2, v2; G_STORE v1, v2; S_ENDPGM', par: 8,
+  },
+  {
+    id: '7-3', book: 7, kind: '개념', title: '레지스터 아끼기',
+    text: '7-2와 같은 일(워크그룹 넷, 이번엔 CU 하나)인데 이 CU의 VGPR 칸이 레인마다 8개뿐이에요(단순화). 웨이브 하나가 v0부터 쓴 가장 큰 번호까지 k칸을 차지하면, 동시에 min(4, ⌊8 ÷ k⌋)웨이브만 올라가요 — 나머지는 앞 웨이브가 끝나야 올라와요. v0·v1 둘만 쓰면 넷이 다 올라와 기다림을 서로 메워요(이 게임에선 3개 → 2개로 줄이면 늘어나요 — 실제 성능은 할당 단위와 병목에 따라 달라요). 50사이클 안에. s0 = 16, s3 = 워크그룹 번호.',
+    hints: ['주소를 v0에 덮어써요 — 읽기는 걸 때 주소를 이미 읽어 갔으니 그 뒤엔 v0을 다른 데 써도 돼요.', 'S_MULI s1, s3, 4 · V_ADD v0, s1, v0 · G_LOAD v1, v0 · V_ADD v0, s0, v0 · S_WAITCNT · V_ADD v1, v1, v1 · G_STORE v0, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, sched: true, wgs: 4, cus: 1, vgprs: 8, wgReg: 3, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_LOADS', 'S_MULI', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 16 }, tests: [{ mem: { 0: 3, 1: 10, 2: 17, 3: 24, 4: 31, 5: 38, 6: 45, 7: 2, 8: 9, 9: 16, 10: 23, 11: 30, 12: 37, 13: 44, 14: 1, 15: 8 }, want: { mem: { 16: 6, 17: 20, 18: 34, 19: 48, 20: 62, 21: 76, 22: 90, 23: 4, 24: 18, 25: 32, 26: 46, 27: 60, 28: 74, 29: 88, 30: 2, 31: 16 } }, maxCycles: 50 }, { mem: { 0: 1, 1: 14, 2: 27, 3: 40, 4: 53, 5: 66, 6: 79, 7: 92, 8: 5, 9: 18, 10: 31, 11: 44, 12: 57, 13: 70, 14: 83, 15: 96 }, want: { mem: { 16: 2, 17: 28, 18: 54, 19: 80, 20: 106, 21: 132, 22: 158, 23: 184, 24: 10, 25: 36, 26: 62, 27: 88, 28: 114, 29: 140, 30: 166, 31: 192 } }, maxCycles: 50 }] },
+    sol: 'S_MULI s1, s3, 4; V_ADD v0, s1, v0; G_LOAD v1, v0; V_ADD v0, s0, v0; S_WAITCNT; V_ADD v1, v1, v1; G_STORE v0, v1; S_ENDPGM', par: 8,
+  },
+  {
+    id: '7-4', book: 7, kind: '개념', title: '커널 인자',
+    text: '배열이 어디 있는지는 프로그램이 아니라 커널 인자로 받아요. 인자는 기억에 놓여 있고, 그 주소가 s0에 들어와요(LLVM AMDHSA ABI에서도 커널 인자 주소가 user SGPR로 들어와요 — 「단순화한 것」 참고). 인자 0 = 읽을 배열 시작, 인자 1 = 쓸 배열 시작. S_LOADS로 기억[s0 + n]을 읽어요. 출력[레인] = 입력[레인] × 2. 입력마다 배열 자리가 달라요.',
+    hints: ['인자 둘을 s1·s2로 읽고 기다린 뒤, 시작 주소 + 레인 번호로 읽고 써요.', 'S_LOADS s1, s0, 0 · S_LOADS s2, s0, 1 · S_WAITCNT · V_ADD v1, s1, v0 · G_LOAD v1, v1 · V_ADD v2, s2, v0 · S_WAITCNT · V_ADD v1, v1, v1 · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, sched: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_LOADS', 'S_MULI', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 28 }, tests: [{ mem: { 28: 0, 29: 8, 0: 1, 1: 2, 2: 3, 3: 4 }, want: { mem: { 8: 2, 9: 4, 10: 6, 11: 8 } } }, { mem: { 28: 12, 29: 20, 12: 5, 13: 0, 14: 100, 15: 7 }, want: { mem: { 20: 10, 21: 0, 22: 200, 23: 14 } } }] },
+    sol: 'S_LOADS s1, s0, 0; S_LOADS s2, s0, 1; S_WAITCNT; V_ADD v1, s1, v0; G_LOAD v1, v1; V_ADD v2, s2, v0; S_WAITCNT; V_ADD v1, v1, v1; G_STORE v2, v1; S_ENDPGM', par: 10,
+  },
+  {
+    id: '7-5', book: 7, kind: '연습', title: '벡터 더하기 커널',
+    text: '다 합쳐요: c[id] = a[id] + b[id], 작업 8개(워크그룹 둘, CU 둘). 인자 0·1·2 = a·b·c 시작 주소(기억[s0 + n]), 전체 번호 = s3 × 4 + v0. 8부에서는 CPU가 이 커널을 GPU에 맡길 때 커널 인자 주소를 user-data 레지스터에 설정하고, PM4 디스패치 패킷으로 워크그룹 수를 지정해요. s 레지스터가 넷뿐이라 아껴 써요.',
+    hints: ['전체 번호를 먼저 v0에 만들고 나면 s3은 다시 써도 돼요. 인자 셋을 s1·s2·s3에.', 'S_MULI s1, s3, 4 · V_ADD v0, s1, v0 · S_LOADS s1, s0, 0 · S_LOADS s2, s0, 1 · S_LOADS s3, s0, 2 · S_WAITCNT · V_ADD v1, s1, v0 · G_LOAD v1, v1 · V_ADD v2, s2, v0 · G_LOAD v2, v2 · V_ADD v3, s3, v0 · S_WAITCNT · V_ADD v1, v1, v2 · G_STORE v3, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, sched: true, wgs: 2, cus: 2, wgReg: 3, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_LOADS', 'S_MULI', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 28 }, tests: [{ mem: { 28: 0, 29: 8, 30: 16, 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 10, 9: 20, 10: 30, 11: 40, 12: 50, 13: 60, 14: 70, 15: 80 }, want: { mem: { 16: 11, 17: 22, 18: 33, 19: 44, 20: 55, 21: 66, 22: 77, 23: 88 } } }, { mem: { 28: 16, 29: 0, 30: 8, 16: 9, 17: 9, 18: 9, 19: 9, 20: 1, 21: 1, 22: 1, 23: 1, 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8 }, want: { mem: { 8: 10, 9: 11, 10: 12, 11: 13, 12: 6, 13: 7, 14: 8, 15: 9 } } }] },
+    sol: 'S_MULI s1, s3, 4; V_ADD v0, s1, v0; S_LOADS s1, s0, 0; S_LOADS s2, s0, 1; S_LOADS s3, s0, 2; S_WAITCNT; V_ADD v1, s1, v0; G_LOAD v1, v1; V_ADD v2, s2, v0; G_LOAD v2, v2; V_ADD v3, s3, v0; S_WAITCNT; V_ADD v1, v1, v2; G_STORE v3, v1; S_ENDPGM', par: 15,
+  },
+  {
+    id: '7-6', book: 7, kind: '시험', title: '7부 시험', pool: ['7-2', '7-3', '7-4', '7-5'], rounds: 3,
+    text: '7부의 커널 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 8부(CP·PM4)로 가요.',
   },
 ];
