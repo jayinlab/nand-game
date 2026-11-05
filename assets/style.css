@@ -184,3 +184,17 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .cplog li.bad { color: var(--x); font-weight: 700; }
 .cplog li.none { color: var(--mute); }
 .unlock { text-align: center; margin: 18px 0 0; }
+
+/* 9부 드라이버·레지스터 배정 */
+.pages { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; margin: 4px 0 8px; }
+.page { border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; font-variant-numeric: tabular-nums; background: var(--bg); }
+.page small { display: block; font-size: 11px; color: var(--mute); }
+.page.other { opacity: .55; }
+.page.mine { border-color: var(--accent); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.tt.ra td.code { text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: nowrap; }
+.tt.ra td.code small { color: var(--accent); }
+.tt.ra td, .tt.ra th { padding: 4px 3px; }
+.raedit { margin: 10px 0; display: grid; gap: 6px; }
+.rarow { display: flex; align-items: center; gap: 6px; }
+.rarow > span { min-width: 34px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

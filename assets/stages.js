@@ -193,7 +193,8 @@ export function cuInit(asm, x, prog = []) {
   const used = vgprsUsed(prog);
   const cap = Math.max(1, Math.min(4, Math.floor((asm.vgprs || 99) / used))); // CU마다 동시에 올라가는 웨이브(슬롯 4)
   const mem = Array.from({ length: MEMN }, (_, i) => (x.mem && x.mem[i]) || 0);
-  const m = { t: 0, waves, cus: C, cap, used, cur: Array(C).fill(-1), mem, lds: Array.from({ length: G }, () => Array(LDSN).fill(0)), cache: [], memFree: 0, pending: [], halted: false, steps: 0, idle: 0 };
+  const vm = asm.vm; // 9부: 가상 쪽(4칸) → 물리 쪽. 없으면 주소 = 칸 번호
+  const m = { vm, t: 0, waves, cus: C, cap, used, cur: Array(C).fill(-1), mem, lds: Array.from({ length: G }, () => Array(LDSN).fill(0)), cache: [], memFree: 0, pending: [], halted: false, steps: 0, idle: 0 };
   cuLaunch(m);
   return m;
 }
@@ -227,19 +228,26 @@ function cuLoadLatency(m, addrs) {
   while (m.cache.length > CACHE_LINES) m.cache.shift();
   return ready;
 }
+// 가상 주소 → 물리 칸. 매핑 안 된 곳이면 page fault로 멈춘다
+function xl(m, a) {
+  if (!m.vm) return a % MEMN;
+  const vp = a >> 2;
+  if (!(vp in m.vm)) { if (!m.err) m.err = `가상 주소 ${a}는 매핑돼 있지 않아요(page fault).`; m.halted = true; return 0; }
+  return m.vm[vp] * 4 + (a & 3);
+}
 function cuExec(prog, m, w) {
   const { op, a } = prog[w.pc];
   if (!MEMOPS.has(op)) { vecStep(prog, w); return; }
   const act = []; for (let l = 0; l < LANES; l++) if ((w.exec >> l) & 1) act.push(l);
   const addr = (l) => w.v[a[op === 'G_LOAD' || op === 'DS_READ' ? 1 : 0]][l];
   if (op === 'G_LOAD') {
-    const ad = act.map((l) => addr(l) % MEMN);
+    const ad = act.map((l) => xl(m, addr(l)));
     const vals = act.map((l, i) => m.mem[ad[i]]);
     m.pending.push({ w: w.id, reg: a[0], lanes: act, vals, ready: act.length ? cuLoadLatency(m, ad) : m.t + 1 }); w.pend++;
-  } else if (op === 'G_STORE') for (const l of act) m.mem[addr(l) % MEMN] = w.v[a[1]][l]; // 같은 칸이면 뒤 레인이 남음(단순화)
-  else if (op === 'G_ATOMIC_ADD') for (const l of act) { const i = addr(l) % MEMN; m.mem[i] = (m.mem[i] + w.v[a[1]][l]) & 255; }
-  else if (op === 'S_LOAD') { m.pending.push({ w: w.id, sreg: a[0], val: m.mem[a[1] % MEMN], ready: m.t + 6 }); w.pend++; }
-  else if (op === 'S_LOADS') { m.pending.push({ w: w.id, sreg: a[0], val: m.mem[(w.s[a[1]] + a[2]) % MEMN], ready: m.t + 6 }); w.pend++; }
+  } else if (op === 'G_STORE') for (const l of act) m.mem[xl(m, addr(l))] = w.v[a[1]][l]; // 같은 칸이면 뒤 레인이 남음(단순화)
+  else if (op === 'G_ATOMIC_ADD') for (const l of act) { const i = xl(m, addr(l)); m.mem[i] = (m.mem[i] + w.v[a[1]][l]) & 255; }
+  else if (op === 'S_LOAD') { m.pending.push({ w: w.id, sreg: a[0], val: m.mem[xl(m, a[1])], ready: m.t + 6 }); w.pend++; }
+  else if (op === 'S_LOADS') { m.pending.push({ w: w.id, sreg: a[0], val: m.mem[xl(m, w.s[a[1]] + a[2])], ready: m.t + 6 }); w.pend++; }
   else if (op === 'DS_WRITE') { const L = m.lds[w.wg]; for (const l of act) L[addr(l) % LDSN] = w.v[a[1]][l]; }
   else if (op === 'DS_ADD') { const L = m.lds[w.wg]; for (const l of act) { const i = addr(l) % LDSN; L[i] = (L[i] + w.v[a[1]][l]) & 255; } }
   else if (op === 'DS_READ') { const L = m.lds[w.wg]; m.pending.push({ w: w.id, reg: a[0], lanes: act, vals: act.map((l) => L[addr(l) % LDSN]), ready: m.t + 2 }); w.pend++; }
@@ -284,7 +292,7 @@ export function cuStep(prog, m) {
 export function cuRun(prog, asm, x, limit = 3000) {
   const m = cuInit(asm, x, prog);
   while (!m.halted && m.t < limit) cuStep(prog, m);
-  if (!m.halted) m.err = 'loop';
+  if (!m.halted && !m.err) m.err = 'loop';
   return m;
 }
 export function cuOk(x, m) {
@@ -377,9 +385,10 @@ export function pm4Run(P, dwords, db, x = {}) {
         const G = X * Y * Z;
         if (!G || G > 8) { err = `워크그룹 ${X}×${Y}×${Z} = ${G}개 — 이 게임은 1~8개예요.`; break; }
         const view = mem.slice(); for (const [k, v] of Object.entries(stale)) view[k] = v; // 캐시에 남은 옛값
-        const m = cuRun(parseVec(K.sol), { cu: true, vec: true, waves: tx / 4, wgs: G, cus: 2, wgReg: 3, s: { 0: sh[SH_REGS.COMPUTE_USER_DATA_0] || 0, 1: sh[SH_REGS.COMPUTE_USER_DATA_1] || 0 } }, { mem: Object.fromEntries(view.map((v, k) => [k, v])) });
+        const m = cuRun(parseVec(K.sol), { cu: true, vec: true, vm: P.vm, waves: tx / 4, wgs: G, cus: 2, wgReg: 3, s: { 0: sh[SH_REGS.COMPUTE_USER_DATA_0] || 0, 1: sh[SH_REGS.COMPUTE_USER_DATA_1] || 0 } }, { mem: Object.fromEntries(view.map((v, k) => [k, v])) });
         m.mem.forEach((v, k) => { if (v !== view[k]) { mem[k] = v; delete stale[k]; } });
-        log.push(`DISPATCH_DIRECT — ${K.name}, 워크그룹 ${G}개 × ${tx}작업, ${m.t}사이클${m.err ? ' (안 멈춤)' : ''}`);
+        log.push(`DISPATCH_DIRECT — ${K.name}, 워크그룹 ${G}개 × ${tx}작업, ${m.t}사이클${m.err === 'loop' ? ' (안 멈춤)' : ''}`);
+        if (m.err && m.err !== 'loop') { err = `커널: ${m.err}`; break; }
       } else if (op === 'RELEASE_MEM') { mem[body[0] % MEMN] = body[1] & 255; log.push(`RELEASE_MEM — 앞의 일이 끝나서 기억[${body[0]}] ← ${body[1]}`); }
       else if (op === 'WAIT_REG_MEM') {
         const [fn, a, ref, mask] = body;
@@ -393,7 +402,7 @@ export function pm4Run(P, dwords, db, x = {}) {
         const [lo, hi, size] = body, ib = (P.ibs || {})[lo];
         if (where !== '링') { err = 'IB 안의 IB는 이 게임에선 안 돼요.'; break; }
         if (hi || !ib) { err = `INDIRECT_BUFFER — 주소 0x${(hi * 2 ** 32 + lo).toString(16)}엔 IB가 없어요.`; break; }
-        const nums = parsePm4(ib).dw.map(dwordOf);
+        const nums = Array.isArray(ib) ? ib : parsePm4(ib).dw.map(dwordOf);
         if (size > nums.length) { err = `INDIRECT_BUFFER — 크기 ${size}가 IB(${nums.length} dword)보다 커요.`; break; }
         log.push(`INDIRECT_BUFFER — 0x${lo.toString(16)}의 IB ${size} dword 실행`);
         exec((k) => (k < size ? nums[k] : undefined), 'IB');
@@ -406,6 +415,151 @@ export function pm4Run(P, dwords, db, x = {}) {
   else exec((k) => (k < avail ? ring[(r0 + k) % N] : undefined), '링');
   if (!err) rp = wptr;
   return { mem, sh, rptr: rp, wptr, log, err, ring };
+}
+
+// ---------- 9부: 드라이버 ----------
+// 물리 기억 32칸 = 쪽(page) 8개 × 4칸, GPU 가상 주소 0~63 = 가상 쪽 16개(단순화 — 실제 쪽은 4KB 이상).
+// 드라이버 변수 r0~r3에 버퍼 손잡이를 담는다. SUBMIT은 줄에 세워 두고, WAIT_FENCE(또는 끝)에서 GPU가 돈다.
+export const PAGES = 8, VPAGES = 16;
+export const DRV_NOTE = '9부는 드라이버를 단순화했어요. 물리 기억은 4칸짜리 쪽 8개, GPU 가상 주소는 0~63(쪽 16개)예요 — 실제 쪽은 4KB 이상이고, GPU VM 페이지 표는 여러 단계에 권한·캐시 비트도 있어요. BO_ALLOC은 비어 있는 물리 쪽을 앞에서부터 골라요 — 실제로는 사용자 모드 드라이버가 VRAM/GTT 같은 메모리 영역과 속성을 요청하고, 커널 드라이버가 가용 공간·정책에 따라 배치하고 필요하면 옮겨요. 게임은 새 버퍼를 0으로 채워요 — 현재 amdgpu의 GEM_CREATE 경로는 VRAM을 초기화하지만, 모든 경로에서 0을 가정하진 말고 필요한 입력은 직접 써요. BO_FREE는 매핑을 빼고 물리 쪽을 바로 돌려줘요 — 실제로는 GPU 사용과 남은 참조가 정리돼야 저장 공간을 회수해요. 게임은 GPU 가상 주소 범위의 예약·해제 관리를 생략해요 — 실제 libdrm에선 amdgpu_va_range_alloc/free로 범위를 관리하고, GEM_VA로 BO를 매핑·해제해요. CPU_WRITE는 CPU 매핑으로 바로 써지고 캐시·일관성 문제는 없다고 쳐요. EMIT_SET_SH·EMIT_DISPATCH는 패킷 하나씩만 써요 — 실제 RADV는 셰이더 주소·자원(RSRC)·user SGPR·캐시 처리 등 훨씬 많은 패킷을 써요. 셰이더 코드는 드라이버가 이미 GPU 주소 0x2400에 올려 둔 걸로 쳐요. 게임은 IB용 BO의 할당·CPU/GPU 매핑, 제출 컨텍스트와 BO 목록 준비를 생략해요. 실제 SUBMIT은 IB의 GPU 주소·길이 등과 선택적 동기화 정보를 넘기고, 완료를 추적할 제출 번호를 받아요. 커널 드라이버는 의존성과 스케줄링을 거쳐 링에 IB 실행과 완료 펜스 기록 명령을 넣어요. WAIT_FENCE는 amdgpu_cs_query_fence_status에 무한 대기를 지정해 완료를 확인하는 경우를 흉내 내요. 게임에선 WAIT_FENCE(또는 끝) 전에는 GPU 계산이 진행되지 않지만, 실제 GPU는 비동기로 돌아서 그 전에 끝나 있을 수도 있어요 — 그래도 완료를 확인하지 않고 읽으면 아직 계산 안 된 값을 읽을 수 있어요. 게임은 매핑 안 된 주소에 접근하면 page fault로 실행을 멈춰요 — 실제 오류 처리와 복구 방식은 하드웨어·드라이버 설정에 따라 달라요.';
+export const RA_NOTE = '레지스터 배정은 컴파일러(Mesa ACO나 LLVM)가 하는 일을 아주 줄였어요. 실제 컴파일러는 값마다 살아 있는 구간을 따져 레지스터를 나누고, SGPR·VGPR 따로, 명령마다 제약도 지키고, 모자라면 기억에 잠깐 내려놓아요(spill). 게임에선 t를 v 번호 하나에 배정하고, 돌려 봐서 답이 맞으면 통과예요.';
+export const SHLIST = ['COMPUTE_PGM_LO', 'COMPUTE_NUM_THREAD_X', 'COMPUTE_USER_DATA_0'];
+export const DISA = {
+  BO_ALLOC: { args: ['r', 'n'], real: 'amdgpu_bo_alloc (DRM_AMDGPU_GEM_CREATE)', desc: 'rD ← n칸 버퍼(쪽 단위로 올림, 빈 물리 쪽 아무 데나)' },
+  BO_FREE: { args: ['r'], real: 'amdgpu_bo_va_op(UNMAP) 뒤 amdgpu_bo_free', desc: '버퍼를 매핑에서 빼고 풀어요(게임은 물리 쪽을 바로 돌려받아요)' },
+  VA_MAP: { args: ['r', 'N'], real: 'amdgpu_bo_va_op(AMDGPU_VA_OP_MAP) (DRM_AMDGPU_GEM_VA)', desc: '버퍼를 GPU 가상 주소 N부터 보이게(N은 4의 배수)' },
+  CPU_WRITE: { args: ['r', 'n', 'N'], real: 'amdgpu_bo_cpu_map 뒤 CPU가 쓰기', desc: '버퍼의 n번 칸에 N을 써요' },
+  CPU_COPY: { args: ['r', 'n', 'r', 'n'], real: 'CPU 매핑으로 읽고 쓰기', desc: '첫 버퍼의 a번 칸 ← 둘째 버퍼의 b번 칸' },
+  EMIT_SET_SH: { args: ['g', 'N'], real: 'radeon_set_sh_reg (Mesa)', desc: 'IB에 SET_SH_REG 패킷(3 dword)을 써요' },
+  EMIT_DISPATCH: { args: ['n'], real: 'RADV의 디스패치 패킷 쓰기', desc: 'IB에 DISPATCH_DIRECT(n,1,1,1) 패킷(5 dword)' },
+  SUBMIT: { args: [], real: 'amdgpu_cs_submit (DRM_AMDGPU_CS)', desc: 'IB 정보를 커널 드라이버에 넘기고 제출 번호를 받아요 — 커널 드라이버가 링에 IB 실행과 펜스 기록을 넣어요' },
+  WAIT_FENCE: { args: [], real: 'amdgpu_cs_query_fence_status (DRM_AMDGPU_WAIT_CS), 무한 대기', desc: '제출한 일이 끝날 때까지 CPU가 기다려요' },
+  END: { args: [], real: '', desc: '끝(남은 제출은 이때 돌아요)' },
+};
+export function drvInit(D, x = {}) {
+  const owner = Array(PAGES).fill(null);
+  for (const p of D.used || []) owner[p] = 'X';
+  const mem = Array(MEMN).fill(0);
+  const bos = {}, r = [null, null, null, null], pt = {};
+  let next = 1;
+  for (const b of D.pre || []) { // 미리 있는 버퍼 { r, pages, va, data }
+    const h = next++;
+    bos[h] = { pages: b.pages.slice(), va: b.va ?? null, n: b.pages.length * 4 };
+    b.pages.forEach((p) => { owner[p] = h; });
+    if (b.va != null) b.pages.forEach((p, i) => { pt[(b.va >> 2) + i] = p; });
+    const data = (x.data && x.data[b.r]) || b.data || [];
+    data.forEach((v, i) => { mem[b.pages[i >> 2] * 4 + (i & 3)] = v; });
+    r[b.r] = h;
+  }
+  return { pc: 0, r, bos, owner, pt, mem, next, ib: (D.ib ? parsePm4(D.ib).dw.map(dwordOf) : []), queue: [], fence: 0, submitted: 0, log: [], halted: false, steps: 0, err: null };
+}
+function drvGpu(D, m, end) { // 줄 선 제출을 차례로 돌린다(end면 게임이 대신 내는 제출 D.auto도)
+  if (end && D.auto && !m.autoDone) { m.queue.push(parsePm4(D.auto).dw.map(dwordOf)); m.autoDone = true; }
+  for (const ib of m.queue) {
+    const ring = [pm4Hdr('INDIRECT_BUFFER', 2), 0x40, 0, ib.length];
+    const P = { ring: 16, sh: { 0xb820: 1, 0xb824: 1, ...(D.sh || {}) }, ibs: { 0x40: ib }, vm: m.pt };
+    const res = pm4Run(P, ring, null, { mem: Object.fromEntries(m.mem.map((v, k) => [k, v])) });
+    m.log.push(...res.log);
+    if (res.err) { m.err = res.err; m.halted = true; return; }
+    res.mem.forEach((v, k) => { m.mem[k] = v; });
+    m.fence++;
+    m.log.push(`펜스 ${m.fence} — 제출 ${m.fence} 끝`);
+  }
+  m.queue = [];
+}
+export function drvStep(D, prog, m) {
+  if (m.halted) return m;
+  if (m.pc >= prog.length) { drvGpu(D, m, true); m.halted = true; return m; }
+  const { op, a } = prog[m.pc];
+  const fail = (t) => { m.err = `${m.pc}번 줄 ${op}: ${t}`; m.halted = true; return m; };
+  const bo = (i) => { const h = m.r[a[i]]; return h && m.bos[h] ? m.bos[h] : null; };
+  if (op === 'END') { drvGpu(D, m, true); m.halted = true; return m; }
+  if (op === 'BO_ALLOC') {
+    const need = Math.ceil(a[1] / 4) || 1, free = [];
+    for (let p = 0; p < PAGES && free.length < need; p++) if (!m.owner[p]) free.push(p);
+    if (free.length < need) return fail(`빈 물리 쪽이 ${need}개 필요한데 ${free.length}개뿐이에요.`);
+    const h = m.next++;
+    m.bos[h] = { pages: free, va: null, n: need * 4 };
+    free.forEach((p) => { m.owner[p] = h; for (let c = 0; c < 4; c++) m.mem[p * 4 + c] = 0; }); // 새 버퍼는 0으로(DRV_NOTE)
+    m.r[a[0]] = h;
+    m.log.push(`BO_ALLOC — r${a[0]} = 손잡이 ${h}, 물리 쪽 ${free.join('·')}`);
+  } else if (op === 'BO_FREE') {
+    const b = bo(0); if (!b) return fail(`r${a[0]}에 버퍼가 없어요.`);
+    if (b.va != null) b.pages.forEach((_, i) => { delete m.pt[(b.va >> 2) + i]; });
+    b.pages.forEach((p) => { m.owner[p] = null; });
+    delete m.bos[m.r[a[0]]]; m.r[a[0]] = null;
+    m.log.push(`BO_FREE — r${a[0]} 돌려줌`);
+  } else if (op === 'VA_MAP') {
+    const b = bo(0); if (!b) return fail(`r${a[0]}에 버퍼가 없어요.`);
+    const va = a[1];
+    if (va % 4) return fail(`가상 주소 ${va}가 쪽(4칸) 경계가 아니에요.`);
+    if (b.va != null) return fail('이미 매핑된 버퍼예요.');
+    const v0 = va >> 2;
+    if (v0 + b.pages.length > VPAGES) return fail('가상 주소 범위(0~63)를 넘어요.');
+    for (let i = 0; i < b.pages.length; i++) if ((v0 + i) in m.pt) return fail(`가상 주소 ${(v0 + i) * 4}~${(v0 + i) * 4 + 3}엔 이미 다른 매핑이 있어요.`);
+    b.pages.forEach((p, i) => { m.pt[v0 + i] = p; });
+    b.va = va;
+    m.log.push(`VA_MAP — 가상 ${va}~${va + b.pages.length * 4 - 1} → 물리 쪽 ${b.pages.join('·')}`);
+  } else if (op === 'CPU_WRITE') {
+    const b = bo(0); if (!b) return fail(`r${a[0]}에 버퍼가 없어요.`);
+    if (a[1] >= b.n) return fail(`버퍼는 ${b.n}칸이에요.`);
+    m.mem[b.pages[a[1] >> 2] * 4 + (a[1] & 3)] = a[2] & 255;
+  } else if (op === 'CPU_COPY') {
+    const d = bo(0), sb = bo(2); if (!d || !sb) return fail('버퍼가 없는 r이 있어요.');
+    if (a[1] >= d.n || a[3] >= sb.n) return fail('버퍼 밖 칸이에요.');
+    m.mem[d.pages[a[1] >> 2] * 4 + (a[1] & 3)] = m.mem[sb.pages[a[3] >> 2] * 4 + (a[3] & 3)];
+  } else if (op === 'EMIT_SET_SH') {
+    m.ib.push(pm4Hdr('SET_SH_REG', 1), regOff(SHLIST[a[0]]), a[1] >>> 0);
+  } else if (op === 'EMIT_DISPATCH') {
+    m.ib.push(pm4Hdr('DISPATCH_DIRECT', 3), a[0], 1, 1, 1);
+  } else if (op === 'SUBMIT') {
+    if (!m.ib.length) return fail('IB가 비어 있어요.');
+    m.queue.push(m.ib.slice()); m.ib = []; m.submitted++;
+    m.log.push(`SUBMIT — 제출 ${m.submitted} 줄 세움(아직 안 돎)`);
+  } else if (op === 'WAIT_FENCE') {
+    drvGpu(D, m);
+    if (m.halted) return m;
+    m.log.push(`WAIT_FENCE — 펜스 ${m.fence}까지 기다림`);
+  }
+  m.pc++; m.steps++;
+  return m;
+}
+export function drvRun(D, prog, x) {
+  const m = drvInit(D, x);
+  while (!m.halted && m.steps < 200) drvStep(D, prog, m);
+  return m;
+}
+export const vaRead = (m, va) => { const p = m.pt[va >> 2]; return p == null ? null : m.mem[p * 4 + (va & 3)]; };
+export function drvOk(x, m) {
+  if (m.err) return false;
+  const w = x.want || {};
+  for (const [va, v] of Object.entries(w.va || {})) if (vaRead(m, +va) !== v) return false;
+  for (const [ri, arr] of Object.entries(w.bo || {})) {
+    const b = m.bos[m.r[ri]]; if (!b) return false;
+    if (arr.some((v, i) => v != null && m.mem[b.pages[i >> 2] * 4 + (i & 3)] !== v)) return false;
+  }
+  if (w.fence != null && m.fence !== w.fence) return false;
+  return true;
+}
+// 드라이버 명령 글: r0~r3 · 수 · 레지스터 이름(SHLIST)
+export const parseDrv = (t) => t.split(';').map((x) => x.trim()).filter(Boolean).map((x) => {
+  const [op, ...rest] = x.split(/[\s,]+/).filter(Boolean);
+  return { op, a: DISA[op].args.map((k, i) => { const r = rest[i]; if (k === 'r') return +r.slice(1); if (k === 'g') return SHLIST.indexOf(r); return Number(r); }) };
+});
+
+// ---------- 9부: 레지스터 배정 ----------
+// 프로그램의 t1·t2…를 v 레지스터에 배정한다. 배정 = temps 순서의 v 번호 배열(null = 아직)
+export const raSubst = (prog, temps, asg) => prog.replace(/\bt(\d+)\b/g, (_, n) => { const i = temps.indexOf('t' + n); return asg[i] == null ? 'v0' : 'v' + asg[i]; });
+// 줄마다 살아 있는 t — 정의된 줄부터 마지막으로 읽히는 줄까지
+export function raLive(prog, temps) {
+  const lines = prog.split(';').map((x) => x.trim()).filter(Boolean);
+  const def = {}, last = {};
+  lines.forEach((l, k) => {
+    const [op, ...toks] = l.split(/[\s,]+/).filter(Boolean);
+    const writes = VISA[op] && VISA[op].args[0] === 'v' && !['G_STORE', 'G_ATOMIC_ADD', 'DS_WRITE', 'DS_ADD'].includes(op);
+    toks.forEach((t, j) => { if (!/^t\d+$/.test(t)) return; if (writes && j === 0) { if (def[t] == null) def[t] = k; } else last[t] = k; });
+  });
+  return { lines, def, last, live: lines.map((_, k) => temps.filter((t) => def[t] != null && k >= def[t] && k <= (last[t] ?? def[t]))) };
 }
 
 export function vecInit(asm, x) {
@@ -1405,5 +1559,81 @@ export const STAGES = [
   {
     id: '8-13', book: 8, kind: '시험', title: '8부 시험', pool: ['8-4', '8-8', '8-11'], rounds: 3,
     text: '8부의 패킷 짜기 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 9부(드라이버)로 가요.',
+  },
+  // ---------- 9부 드라이버 ----------
+  // 사실 근거: amdgpu 커널 드라이버(DRM_AMDGPU_GEM_CREATE·GEM_VA·CS), libdrm amdgpu, Mesa RADV·ACO. 단순화는 DRV_NOTE·RA_NOTE.
+  {
+    id: '9-1', book: 9, kind: '개념', title: '버퍼 만들기',
+    text: '이제 드라이버 쪽이에요. GPU가 쓰는 기억은 드라이버가 「버퍼 객체」(BO)로 만들어 줘요. BO_ALLOC으로 4칸짜리 버퍼를 만들어 손잡이를 r0에 받고, CPU로 [5, 6, 7, 8]을 써요. 물리 기억은 4칸짜리 쪽(page) 8개예요.',
+    hints: ['BO_ALLOC r0, 4 다음에 CPU_WRITE 넷.', 'BO_ALLOC r0, 4 · CPU_WRITE r0, 0, 5 · CPU_WRITE r0, 1, 6 · CPU_WRITE r0, 2, 7 · CPU_WRITE r0, 3, 8 · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'CPU_WRITE', 'END'], d: {}, tests: [{ want: { bo: { 0: [5, 6, 7, 8] } } }] },
+    sol: 'BO_ALLOC r0, 4; CPU_WRITE r0, 0, 5; CPU_WRITE r0, 1, 6; CPU_WRITE r0, 2, 7; CPU_WRITE r0, 3, 8; END', par: 6,
+  },
+  {
+    id: '9-2', book: 9, kind: '개념', title: 'GPU 가상 주소',
+    text: 'GPU는 물리 기억을 바로 보지 않고 가상 주소로 봐요. VA_MAP은 버퍼를 GPU 가상 주소에 붙여요 — 페이지 표에 「가상 쪽 → 물리 쪽」이 적혀요. 4칸 버퍼를 만들어 가상 주소 16에 붙이고 [5, 6, 7, 8]을 써서, GPU가 16~19에서 읽게 해요.',
+    hints: ['만들기 → 붙이기 → 쓰기(붙이기와 쓰기 순서는 상관없어요).', 'BO_ALLOC r0, 4 · VA_MAP r0, 16 · CPU_WRITE r0, 0, 5 · … · CPU_WRITE r0, 3, 8 · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'VA_MAP', 'CPU_WRITE', 'END'], d: {}, tests: [{ want: { va: { 16: 5, 17: 6, 18: 7, 19: 8 } } }] },
+    sol: 'BO_ALLOC r0, 4; VA_MAP r0, 16; CPU_WRITE r0, 0, 5; CPU_WRITE r0, 1, 6; CPU_WRITE r0, 2, 7; CPU_WRITE r0, 3, 8; END', par: 7,
+  },
+  {
+    id: '9-3', book: 9, kind: '연습', title: '흩어진 물리 쪽',
+    text: '물리 쪽 1·2는 다른 앱이 쓰고 있어요. 8칸 버퍼를 만들면 물리 쪽 0과 3에 흩어져 놓여요 — 그래도 가상 주소 8~15에 붙이면 GPU에겐 이어진 8칸으로 보여요. 1~8을 써서 GPU가 가상 8~15에서 1~8을 읽게 해요.',
+    hints: ['BO_ALLOC r0, 8 · VA_MAP r0, 8, 그리고 CPU_WRITE 여덟.', 'BO_ALLOC r0, 8 · VA_MAP r0, 8 · CPU_WRITE r0, 0, 1 · CPU_WRITE r0, 1, 2 · … · CPU_WRITE r0, 7, 8 · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'VA_MAP', 'CPU_WRITE', 'END'], d: { used: [1, 2] }, tests: [{ want: { va: { 8: 1, 9: 2, 10: 3, 11: 4, 12: 5, 13: 6, 14: 7, 15: 8 } } }] },
+    sol: 'BO_ALLOC r0, 8; VA_MAP r0, 8; CPU_WRITE r0, 0, 1; CPU_WRITE r0, 1, 2; CPU_WRITE r0, 2, 3; CPU_WRITE r0, 3, 4; CPU_WRITE r0, 4, 5; CPU_WRITE r0, 5, 6; CPU_WRITE r0, 6, 7; CPU_WRITE r0, 7, 8; END', par: 11,
+  },
+  {
+    id: '9-4', book: 9, kind: '개념', title: '커널에 넘기기',
+    text: '벡터 더하기 커널(7-5)을 돌릴 거예요. a(r0)는 가상 0, b(r1)는 가상 4에 이미 있어요. c 버퍼(r2)를 가상 8에, 커널 인자 버퍼(r3)를 가상 12에 만들고, 인자 = [a·b·c의 가상 주소 0, 4, 8]을 써요. 끝나면 게임이 USER_DATA_0 = 12로 디스패치해 줘요(제출은 9-8부터). 커널도 가상 주소로 읽어요 — 게임은 안 붙인 곳을 읽으면 page fault로 멈춰요(실제 처리 방식은 하드웨어·설정에 따라 달라요).',
+    hints: ['c: 만들고 붙이기. 인자: 만들고 붙이고 세 칸 쓰기.', 'BO_ALLOC r2, 4 · VA_MAP r2, 8 · BO_ALLOC r3, 4 · VA_MAP r3, 12 · CPU_WRITE r3, 0, 0 · CPU_WRITE r3, 1, 4 · CPU_WRITE r3, 2, 8 · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'VA_MAP', 'CPU_WRITE', 'END'], d: { pre: [{ r: 0, pages: [0], va: 0, data: [1, 2, 3, 4] }, { r: 1, pages: [1], va: 4, data: [10, 20, 30, 40] }], auto: 'H SET_SH_REG 1; R COMPUTE_PGM_LO; V 0x24; H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4; H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 12; H DISPATCH_DIRECT 3; V 1; V 1; V 1; V 1' }, tests: [{ want: { va: { 8: 11, 9: 22, 10: 33, 11: 44 } } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { va: { 8: 6, 9: 9, 10: 8, 11: 200 } } }] },
+    sol: 'BO_ALLOC r2, 4; VA_MAP r2, 8; BO_ALLOC r3, 4; VA_MAP r3, 12; CPU_WRITE r3, 0, 0; CPU_WRITE r3, 1, 4; CPU_WRITE r3, 2, 8; END', par: 8,
+  },
+  {
+    id: '9-5', book: 9, kind: '연습', title: '돌려주기',
+    text: '물리 쪽 0~4는 다른 앱, 5는 다 쓴 임시 버퍼 r0(가상 0에 붙어 있음). 남은 쪽은 6·7뿐이에요. 8칸 r1을 가상 16에, 4칸 r2를 가상 0에 만들고 r1[0] = 1, r2[0] = 2. 쪽도 모자라고 가상 0도 막혀 있으니, 먼저 r0을 돌려줘요(매핑 빼기 + 버퍼 풀기).',
+    hints: ['BO_FREE r0이 맨 앞.', 'BO_FREE r0 · BO_ALLOC r1, 8 · VA_MAP r1, 16 · BO_ALLOC r2, 4 · VA_MAP r2, 0 · CPU_WRITE r1, 0, 1 · CPU_WRITE r2, 0, 2 · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'BO_FREE', 'VA_MAP', 'CPU_WRITE', 'END'], d: { used: [0, 1, 2, 3, 4], pre: [{ r: 0, pages: [5], va: 0, data: [9, 9, 9, 9] }] }, tests: [{ want: { va: { 16: 1, 0: 2 } } }] },
+    sol: 'BO_FREE r0; BO_ALLOC r1, 8; VA_MAP r1, 16; BO_ALLOC r2, 4; VA_MAP r2, 0; CPU_WRITE r1, 0, 1; CPU_WRITE r2, 0, 2; END', par: 8,
+  },
+  {
+    id: '9-6', book: 9, kind: '개념', title: '레지스터 배정',
+    text: '셰이더를 ISA로 바꾸는 컴파일러의 큰 일 하나: 임시 값(t1~t5)을 진짜 레지스터에 앉히기. c = a + b 커널에서 t 다섯을 v1·v2·v3 셋에 배정해요. 살아 있는 구간이 겹치지 않는 t끼리는 같은 레지스터를 써도 돼요 — 표에서 ●가 그 t가 살아 있는 줄. (v0은 작업 번호, s0 = 4, s1 = 8.)',
+    hints: ['t3를 만드는 명령이 t2를 마지막으로 읽어요 — 그 결과 t3는 t2가 쓰던 레지스터를 다시 써도 돼요. t5도 t1·t3를 마지막으로 읽는 줄에서 생겨요.', 't1 = v1 · t2 = v2 · t3 = v2 · t4 = v3 · t5 = v1.'],
+    ra: { prog: 'G_LOAD t1, v0; V_ADD t2, s0, v0; G_LOAD t3, t2; V_ADD t4, s1, v0; S_WAITCNT; V_ADD t5, t1, t3; G_STORE t4, t5; S_ENDPGM', temps: ['t1', 't2', 't3', 't4', 't5'], regs: [1, 2, 3], asm: { cu: true, vec: true, s: { 0: 4, 1: 8 } }, tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4, 4: 10, 5: 20, 6: 30, 7: 40 }, want: { mem: { 8: 11, 9: 22, 10: 33, 11: 44 } } }, { mem: { 0: 9, 1: 0, 2: 5, 3: 1, 4: 1, 5: 7, 6: 0, 7: 2 }, want: { mem: { 8: 10, 9: 7, 10: 5, 11: 3 } } }] },
+    sol: 'v1 v2 v2 v3 v1',
+  },
+  {
+    id: '9-7', book: 9, kind: '연습', title: '두 칸에 앉히기',
+    text: '7-3의 두 배 커널을 v0·v1 둘에만 배정해요 — 그래야 VGPR 2개로 웨이브 넷이 다 올라가 50사이클 안에 끝나요. v0은 처음엔 작업 번호지만 t1을 만든 뒤엔 다시 써도 돼요. (s0 = 16, s3 = 워크그룹 번호.)',
+    hints: ['읽기 결과 t2가 오는 중일 때 그 자리를 다른 t가 쓰면 안 돼요.', 't1 = v0 · t2 = v1 · t3 = v0 · t4 = v1.'],
+    ra: { prog: 'S_MULI s1, s3, 4; V_ADD t1, s1, v0; G_LOAD t2, t1; V_ADD t3, s0, t1; S_WAITCNT; V_ADD t4, t2, t2; G_STORE t3, t4; S_ENDPGM', temps: ['t1', 't2', 't3', 't4'], regs: [0, 1], asm: { cu: true, vec: true, wgs: 4, cus: 1, vgprs: 8, wgReg: 3, s: { 0: 16 } }, tests: [{ mem: { 0: 3, 1: 10, 2: 17, 3: 24, 4: 31, 5: 38, 6: 45, 7: 2, 8: 9, 9: 16, 10: 23, 11: 30, 12: 37, 13: 44, 14: 1, 15: 8 }, want: { mem: { 16: 6, 17: 20, 18: 34, 19: 48, 20: 62, 21: 76, 22: 90, 23: 4, 24: 18, 25: 32, 26: 46, 27: 60, 28: 74, 29: 88, 30: 2, 31: 16 } }, maxCycles: 50 }] },
+    sol: 'v0 v1 v0 v1',
+  },
+  {
+    id: '9-8', book: 9, kind: '개념', title: '명령 버퍼 채우기',
+    text: '사용자 모드 드라이버(UMD, 예: RADV)는 PM4 패킷을 IB에 써요 — 8부에서 손으로 짠 걸 함수가 대신. a·b·c·인자 버퍼는 9-4처럼 다 준비돼 있어요. 레지스터 셋을 쓰고 디스패치하고, 제출(SUBMIT)하고, 펜스를 기다려요(WAIT_FENCE). 커널 주소는 0x2400 → PGM_LO = 36(0x24).',
+    hints: ['EMIT_SET_SH 셋(PGM_LO 36 · NUM_THREAD_X 4 · USER_DATA_0 12) → EMIT_DISPATCH 1 → SUBMIT → WAIT_FENCE.', 'EMIT_SET_SH COMPUTE_PGM_LO, 36 · EMIT_SET_SH COMPUTE_NUM_THREAD_X, 4 · EMIT_SET_SH COMPUTE_USER_DATA_0, 12 · EMIT_DISPATCH 1 · SUBMIT · WAIT_FENCE · END.'],
+    asm: { drv: true, vec: true, ops: ['EMIT_SET_SH', 'EMIT_DISPATCH', 'SUBMIT', 'WAIT_FENCE', 'END'], d: { pre: [{ r: 0, pages: [0], va: 0, data: [1, 2, 3, 4] }, { r: 1, pages: [1], va: 4, data: [10, 20, 30, 40] }, { r: 2, pages: [2], va: 8 }, { r: 3, pages: [3], va: 12, data: [0, 4, 8] }] }, tests: [{ want: { va: { 8: 11, 9: 22, 10: 33, 11: 44 }, fence: 1 } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { va: { 8: 6, 9: 9, 10: 8, 11: 200 }, fence: 1 } }] },
+    sol: 'EMIT_SET_SH COMPUTE_PGM_LO, 36; EMIT_SET_SH COMPUTE_NUM_THREAD_X, 4; EMIT_SET_SH COMPUTE_USER_DATA_0, 12; EMIT_DISPATCH 1; SUBMIT; WAIT_FENCE; END', par: 7,
+  },
+  {
+    id: '9-9', book: 9, kind: '개념', title: '기다려야 읽어요',
+    text: 'SUBMIT은 일을 넘기기만 하고 바로 돌아와요 — GPU는 비동기로 돌아요(게임에선 WAIT_FENCE 때 돌아요). IB는 9-8처럼 채워져 있어요. 제출한 뒤 CPU가 c[0]을 a[0] 자리에 옮겨 적어요(CPU_COPY r0, 0, r2, 0). 펜스를 기다리지 않으면 아직 계산 안 된 c를 읽어요.',
+    hints: ['SUBMIT과 CPU_COPY 사이에 WAIT_FENCE.', 'SUBMIT · WAIT_FENCE · CPU_COPY r0, 0, r2, 0 · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'BO_FREE', 'VA_MAP', 'CPU_WRITE', 'CPU_COPY', 'EMIT_SET_SH', 'EMIT_DISPATCH', 'SUBMIT', 'WAIT_FENCE', 'END'], d: { pre: [{ r: 0, pages: [0], va: 0, data: [1, 2, 3, 4] }, { r: 1, pages: [1], va: 4, data: [10, 20, 30, 40] }, { r: 2, pages: [2], va: 8 }, { r: 3, pages: [3], va: 12, data: [0, 4, 8] }], ib: 'H SET_SH_REG 1; R COMPUTE_PGM_LO; V 0x24; H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4; H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 12; H DISPATCH_DIRECT 3; V 1; V 1; V 1; V 1' }, tests: [{ want: { va: { 8: 11, 9: 22, 10: 33, 11: 44 }, bo: { 0: [11] } } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { va: { 8: 6, 9: 9, 10: 8, 11: 200 }, bo: { 0: [6] } } }] },
+    sol: 'SUBMIT; WAIT_FENCE; CPU_COPY r0, 0, r2, 0; END', par: 4,
+  },
+  {
+    id: '9-10', book: 9, kind: '연습', title: '처음부터 끝까지',
+    text: 'a(r0, 가상 0)·b(r1, 가상 4)만 있어요. c(r2)와 인자(r3)를 만들어 가상 8·12에 붙이고 인자를 쓰고, IB를 채워 제출하고 기다려요 — 드라이버가 커널 하나를 돌리는 전부예요.',
+    hints: ['9-4의 앞 일곱 줄 + 9-8의 여섯 줄.', 'BO_ALLOC r2, 4 · VA_MAP r2, 8 · BO_ALLOC r3, 4 · VA_MAP r3, 12 · CPU_WRITE r3, 0, 0 · CPU_WRITE r3, 1, 4 · CPU_WRITE r3, 2, 8 · EMIT_SET_SH COMPUTE_PGM_LO, 36 · EMIT_SET_SH COMPUTE_NUM_THREAD_X, 4 · EMIT_SET_SH COMPUTE_USER_DATA_0, 12 · EMIT_DISPATCH 1 · SUBMIT · WAIT_FENCE · END.'],
+    asm: { drv: true, vec: true, ops: ['BO_ALLOC', 'BO_FREE', 'VA_MAP', 'CPU_WRITE', 'CPU_COPY', 'EMIT_SET_SH', 'EMIT_DISPATCH', 'SUBMIT', 'WAIT_FENCE', 'END'], d: { pre: [{ r: 0, pages: [0], va: 0, data: [1, 2, 3, 4] }, { r: 1, pages: [1], va: 4, data: [10, 20, 30, 40] }] }, tests: [{ want: { va: { 8: 11, 9: 22, 10: 33, 11: 44 }, fence: 1 } }, { data: { 0: [5, 0, 7, 100], 1: [1, 9, 1, 100] }, want: { va: { 8: 6, 9: 9, 10: 8, 11: 200 }, fence: 1 } }] },
+    sol: 'BO_ALLOC r2, 4; VA_MAP r2, 8; BO_ALLOC r3, 4; VA_MAP r3, 12; CPU_WRITE r3, 0, 0; CPU_WRITE r3, 1, 4; CPU_WRITE r3, 2, 8; EMIT_SET_SH COMPUTE_PGM_LO, 36; EMIT_SET_SH COMPUTE_NUM_THREAD_X, 4; EMIT_SET_SH COMPUTE_USER_DATA_0, 12; EMIT_DISPATCH 1; SUBMIT; WAIT_FENCE; END', par: 14,
+  },
+  {
+    id: '9-11', book: 9, kind: '시험', title: '9부 시험', pool: ['9-4', '9-6', '9-8', '9-10'], rounds: 3,
+    text: '9부의 드라이버 일 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 마지막 10부(Vulkan)로 가요.',
   },
 ];
