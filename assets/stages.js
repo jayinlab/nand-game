@@ -295,6 +295,119 @@ export function cuOk(x, m) {
   return true;
 }
 
+// ---------- 8부: CP와 PM4 ----------
+// PM4 타입 3 헤더 = 3<<30 | count<<16 | opcode<<8 (count = 본문 dword 수 − 1). 명령 번호·레지스터 주소는 Mesa sid.h와 같다.
+export const PM4_OPS = {
+  NOP: { code: 0x10, body: '아무거나(건너뜀)', desc: '아무 일도 안 해요' },
+  SET_SH_REG: { code: 0x76, body: '레지스터 자리, 값, 값…', desc: '이어진 SH 레지스터들에 값을 써요' },
+  DISPATCH_DIRECT: { code: 0x15, body: 'DIM_X, DIM_Y, DIM_Z, DISPATCH_INITIATOR', desc: '워크그룹 X×Y×Z개로 커널을 돌려요(INITIATOR 0번 자리 = COMPUTE_SHADER_EN)' },
+  RELEASE_MEM: { code: 0x49, body: '주소, 값 (단순화)', desc: '이 큐에서 앞서 낸 일이 끝나면 기억[주소]에 값을 써요(펜스) — 실제로는 이벤트·캐시 동작을 맞춰 골라요' },
+  WAIT_REG_MEM: { code: 0x3c, body: '함수(3 = 같음), 주소, 기준값, 마스크 (단순화)', desc: '기억[주소] AND 마스크가 기준값과 같아질 때까지 기다려요' },
+  ACQUIRE_MEM: { code: 0x58, body: '1 (단순화)', desc: '게임의 GPU 읽기 캐시에 남은 옛값을 버려요 — 실제로는 대상 캐시·범위·동작을 지정해요' },
+  INDIRECT_BUFFER: { code: 0x3f, body: '주소 아래, 주소 위, 크기(dword)', desc: '기억에 있는 다른 명령 묶음(IB)을 읽어 실행해요' },
+};
+export const SH_REGS = {
+  COMPUTE_NUM_THREAD_X: 0xb81c, COMPUTE_NUM_THREAD_Y: 0xb820, COMPUTE_NUM_THREAD_Z: 0xb824,
+  COMPUTE_PGM_LO: 0xb830, COMPUTE_USER_DATA_0: 0xb900, COMPUTE_USER_DATA_1: 0xb904,
+};
+export const SH_BASE = 0xb000;
+export const PM4_NOTE = '8부는 CP와 PM4를 단순화했어요. 헤더 모양(3<<30 | count<<16 | 명령<<8), 명령 번호, SET_SH_REG의 레지스터 자리((주소 − 0xB000) ÷ 4), 레지스터 주소, DISPATCH_DIRECT 본문(DIM_X·Y·Z·INITIATOR, COMPUTE_SHADER_EN = INITIATOR 0번 자리)은 실제(Mesa sid.h)와 같아요. 게임은 헤더 아래 비트(predicate·shader type 등)를 0으로 둬요 — 실제 RADV의 DISPATCH_DIRECT 헤더는 compute 표시까지 넣어 0xC0031502예요. RELEASE_MEM·WAIT_REG_MEM·ACQUIRE_MEM은 본문을 줄였고(실제는 이벤트 종류·캐시 동작·64비트 주소·데이터 선택 등 dword가 더 많아요), INDIRECT_BUFFER의 셋째 dword엔 크기만 넣어요(실제 크기는 bits 19:0이고, compute 링에선 VALID 같은 자리도 써요). 게임은 COMPUTE_PGM_HI와 COMPUTE_PGM_RSRC1·2 같은 나머지 실행 상태를 미리 준비해 둬요 — 실제 PGM_LO엔 「주소 >> 8」의 아래 32비트를, 더 높은 비트는 PGM_HI에 넣어요. 게임은 USER_DATA_0을 s0으로 넘기도록 설정해 두고, 워크그룹 번호를 s3으로 받는 커널은 user SGPR 3개에 TGID_X_EN을 켠 상태를 가정해요. 값은 게임 기억에 맞춰 작고(8비트), GPU 주소 0x1800·0x2400의 커널 창고와 기억 32칸은 지어낸 자리예요. 워크그룹은 X 방향 1~8개, 크기는 X 4·8·12·16(Y·Z는 1)만 돼요. 게임의 CP는 패킷을 하나씩 끝내고 다음으로 가요(디스패치가 다 끝나야 다음 패킷) — 실제 CP는 기다리지 않아서 디스패치끼리 겹칠 수 있고, 그래서 펜스·대기·캐시 패킷이 필요해요. rptr이 앞으로 갔다고 커널 실행까지 끝난 건 아니에요. 게임은 CPU 쪽 제출을 한데 묶었어요 — 보통의 RADV/amdgpu 경로에선 사용자 모드 드라이버가 IB를 만들고 커널 드라이버가 링에 제출해요. 실제로는 패킷 쓰기가 GPU에 보이도록 순서를 보장한 뒤 wptr을 알리고, 경로에 따라 도어벨 대신 wptr 레지스터를 갱신하기도 해요. wptr·rptr은 링 안 dword 자리(0부터, 링 크기로 감김)로 셌어요.';
+export const pm4Hdr = (op, count) => ((3 << 30) | ((count & 0x3fff) << 16) | ((PM4_OPS[op].code & 0xff) << 8)) >>> 0;
+export const regOff = (name) => (SH_REGS[name] - SH_BASE) >> 2;
+export const hex8 = (n) => '0x' + (n >>> 0).toString(16).toUpperCase().padStart(8, '0');
+// 편집기 한 줄 = { k: 'h', op, count } | { k: 'r', reg } | { k: 'v', n }
+export const dwordOf = (d) => (d.k === 'h' ? pm4Hdr(d.op, d.count) : d.k === 'r' ? regOff(d.reg) : d.n >>> 0);
+// 'H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4; DB 3'
+export function parsePm4(t) {
+  const dw = []; let db = null;
+  for (const x of t.split(';').map((y) => y.trim()).filter(Boolean)) {
+    const [k, a, c] = x.split(/\s+/);
+    if (k === 'H') dw.push({ k: 'h', op: a, count: +c });
+    else if (k === 'R') dw.push({ k: 'r', reg: a });
+    else if (k === 'V') dw.push({ k: 'v', n: Number(a) });
+    else if (k === 'DB') db = +a;
+  }
+  return { dw, db };
+}
+// 커널 창고: GPU 주소 → 7부 커널(정답 프로그램)
+export const KERNELS = {
+  0x1800: { name: '두 배 커널(7-2)', sol: 'S_MULI s1, s3, 4; V_ADD v1, s1, v0; G_LOAD v2, v1; V_ADD v1, s0, v1; S_WAITCNT; V_ADD v2, v2, v2; G_STORE v1, v2; S_ENDPGM', args: 'USER_DATA_0 = 쓸 배열 시작' },
+  0x2400: { name: '벡터 더하기 커널(7-5)', sol: 'S_MULI s1, s3, 4; V_ADD v0, s1, v0; S_LOADS s1, s0, 0; S_LOADS s2, s0, 1; S_LOADS s3, s0, 2; S_WAITCNT; V_ADD v1, s1, v0; G_LOAD v1, v1; V_ADD v2, s2, v0; G_LOAD v2, v2; V_ADD v3, s3, v0; S_WAITCNT; V_ADD v1, v1, v2; G_STORE v3, v1; S_ENDPGM', args: 'USER_DATA_0 = 커널 인자 주소(a·b·c 시작)' },
+};
+const OPNAME = Object.fromEntries(Object.entries(PM4_OPS).map(([k, v]) => [v.code, k]));
+const REGNAME = Object.fromEntries(Object.entries(SH_REGS).map(([k, v]) => [v, k]));
+// CP: 링에 놓고 rptr → wptr로 읽으며 패킷을 푼다. 결과 { mem, sh, rptr, log, err }
+export function pm4Run(P, dwords, db, x = {}) {
+  const N = P.ring || 16, r0 = P.rptr || 0;
+  const ring = Array(N).fill(0);
+  dwords.forEach((d, i) => { ring[(r0 + i) % N] = d >>> 0; });
+  const wptr = P.doorbell ? db : (r0 + dwords.length) % N;
+  const mem = Array.from({ length: MEMN }, (_, i) => (x.mem && x.mem[i]) || 0);
+  const sh = { ...(P.sh || {}) };
+  const log = [];
+  let stale = { ...(x.stale || {}) }, tick = 0, err = null;
+  const env = (x.env || []).map((e) => ({ ...e })); // 스테이지 자료는 건드리지 않게 복사
+  const pass = () => { tick++; for (const e of env) if (!e.done && tick >= e.tick) { e.done = true; for (const [k, v] of Object.entries(e.mem)) mem[k] = v; } };
+  function exec(read, where) {
+    // read(i): 묶음의 i번째 dword (없으면 undefined)
+    let i = 0;
+    while (!err) {
+      const h = read(i);
+      if (h === undefined) break;
+      const type = h >>> 30, count = (h >>> 16) & 0x3fff, code = (h >>> 8) & 0xff, op = OPNAME[code];
+      if (type !== 3) { err = `${where} ${i}번째 dword ${hex8(h)}는 타입 3 헤더가 아니에요.`; break; }
+      if (!op) { err = `${where} 명령 번호 0x${code.toString(16)}는 이 게임이 모르는 명령이에요.`; break; }
+      const body = [];
+      for (let k = 1; k <= count + 1; k++) { const d = read(i + k); if (d === undefined) { err = `${op} 본문이 ${count + 1} dword여야 하는데 묶음이 먼저 끝나요(count를 보세요).`; break; } body.push(d); }
+      if (err) break;
+      i += count + 2;
+      pass();
+      if (op === 'NOP') log.push('NOP — 건너뜀');
+      else if (op === 'SET_SH_REG') {
+        const names = [];
+        body.slice(1).forEach((v, k) => { const a = SH_BASE + (body[0] + k) * 4; sh[a] = v; names.push(`${REGNAME[a] || '0x' + a.toString(16)} ← ${v}`); });
+        log.push(`SET_SH_REG — ${names.join(', ') || '(값 없음)'}`);
+      } else if (op === 'DISPATCH_DIRECT') {
+        const [X, Y, Z, init] = body;
+        if (!(init & 1)) { log.push('DISPATCH_DIRECT — COMPUTE_SHADER_EN(INITIATOR 0번 자리)이 0이라 안 돌아요'); continue; }
+        const addr = (sh[SH_REGS.COMPUTE_PGM_LO] || 0) << 8, K = KERNELS[addr];
+        const tx = sh[SH_REGS.COMPUTE_NUM_THREAD_X] || 0, ty = sh[SH_REGS.COMPUTE_NUM_THREAD_Y] ?? 1, tz = sh[SH_REGS.COMPUTE_NUM_THREAD_Z] ?? 1;
+        if (!K) { err = `COMPUTE_PGM_LO = ${sh[SH_REGS.COMPUTE_PGM_LO] || 0} → GPU 주소 0x${addr.toString(16)}엔 커널이 없어요.`; break; }
+        if (!tx || tx % 4 || tx > 16 || ty !== 1 || tz !== 1) { err = `워크그룹 크기 ${tx}×${ty}×${tz} — 이 게임은 X가 4·8·12·16이고 Y·Z는 1이어야 해요.`; break; }
+        const G = X * Y * Z;
+        if (!G || G > 8) { err = `워크그룹 ${X}×${Y}×${Z} = ${G}개 — 이 게임은 1~8개예요.`; break; }
+        const view = mem.slice(); for (const [k, v] of Object.entries(stale)) view[k] = v; // 캐시에 남은 옛값
+        const m = cuRun(parseVec(K.sol), { cu: true, vec: true, waves: tx / 4, wgs: G, cus: 2, wgReg: 3, s: { 0: sh[SH_REGS.COMPUTE_USER_DATA_0] || 0, 1: sh[SH_REGS.COMPUTE_USER_DATA_1] || 0 } }, { mem: Object.fromEntries(view.map((v, k) => [k, v])) });
+        m.mem.forEach((v, k) => { if (v !== view[k]) { mem[k] = v; delete stale[k]; } });
+        log.push(`DISPATCH_DIRECT — ${K.name}, 워크그룹 ${G}개 × ${tx}작업, ${m.t}사이클${m.err ? ' (안 멈춤)' : ''}`);
+      } else if (op === 'RELEASE_MEM') { mem[body[0] % MEMN] = body[1] & 255; log.push(`RELEASE_MEM — 앞의 일이 끝나서 기억[${body[0]}] ← ${body[1]}`); }
+      else if (op === 'WAIT_REG_MEM') {
+        const [fn, a, ref, mask] = body;
+        if (fn !== 3) { err = `WAIT_REG_MEM 함수 ${fn} — 이 게임은 3(같음)만 알아요.`; break; }
+        let n = 0;
+        while (((mem[a % MEMN] & mask) !== ref) && n < 50) { pass(); n++; }
+        if (n >= 50) { err = `WAIT_REG_MEM — 기억[${a}]이 끝내 ${ref}가 안 돼서 CP가 멈춰 있어요.`; break; }
+        log.push(`WAIT_REG_MEM — 기억[${a}] = ${ref} 될 때까지 ${n}틱 기다림`);
+      } else if (op === 'ACQUIRE_MEM') { stale = {}; log.push('ACQUIRE_MEM — GPU 캐시의 옛값을 버림'); }
+      else if (op === 'INDIRECT_BUFFER') {
+        const [lo, hi, size] = body, ib = (P.ibs || {})[lo];
+        if (where !== '링') { err = 'IB 안의 IB는 이 게임에선 안 돼요.'; break; }
+        if (hi || !ib) { err = `INDIRECT_BUFFER — 주소 0x${(hi * 2 ** 32 + lo).toString(16)}엔 IB가 없어요.`; break; }
+        const nums = parsePm4(ib).dw.map(dwordOf);
+        if (size > nums.length) { err = `INDIRECT_BUFFER — 크기 ${size}가 IB(${nums.length} dword)보다 커요.`; break; }
+        log.push(`INDIRECT_BUFFER — 0x${lo.toString(16)}의 IB ${size} dword 실행`);
+        exec((k) => (k < size ? nums[k] : undefined), 'IB');
+      }
+    }
+  }
+  let rp = r0;
+  const avail = (wptr - r0 + N) % N;
+  if (P.doorbell && db == null) err = '도어벨을 아직 안 울렸어요.';
+  else exec((k) => (k < avail ? ring[(r0 + k) % N] : undefined), '링');
+  if (!err) rp = wptr;
+  return { mem, sh, rptr: rp, wptr, log, err, ring };
+}
+
 export function vecInit(asm, x) {
   const v = Array.from({ length: 4 }, (_, r) => Array.from({ length: LANES }, (_, l) => (r === 0 ? l : 0))); // v0 = 레인 번호
   for (const src of [asm.v, x.v]) if (src) for (const [r, arr] of Object.entries(src)) v[r] = arr.slice();
@@ -1202,5 +1315,95 @@ export const STAGES = [
   {
     id: '7-6', book: 7, kind: '시험', title: '7부 시험', pool: ['7-2', '7-3', '7-4', '7-5'], rounds: 3,
     text: '7부의 커널 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 8부(CP·PM4)로 가요.',
+  },
+  // ---------- 8부 CP·PM4 ----------
+  // 사실 근거: Mesa src/amd/common/sid.h(PKT3 헤더·명령 번호·레지스터), radv_cmd_buffer.c, amdgpu. 단순화는 PM4_NOTE.
+  {
+    id: '8-1', book: 8, kind: '개념', title: '첫 패킷',
+    text: '이제 CPU 쪽이에요. CPU는 GPU에 일을 「패킷」(PM4)으로 써서 넘기고, GPU의 CP(명령 처리기)가 그걸 읽어요. 패킷 첫 dword(32비트)는 헤더: 맨 위 두 자리 = 3(타입 3), 그 아래 14자리 = count(본문 dword 수 − 1), 그 아래 8자리 = 명령 번호. SET_SH_REG(0x76)로 COMPUTE_NUM_THREAD_X(워크그룹의 X 방향 작업 수 — 여기선 Y·Z가 1이라 전체 작업 수와 같아요)에 4를 써 봐요. 본문 첫 dword는 레지스터 자리 = (주소 − 0xB000) ÷ 4.',
+    hints: ['헤더(SET_SH_REG, 본문 둘이니 count 1) → 레지스터 → 값.', 'H SET_SH_REG 1 · R COMPUTE_NUM_THREAD_X · V 4 — 헤더는 0xC0017600이 돼요.'],
+    pm4: { ops: ['SET_SH_REG'], regs: ['COMPUTE_NUM_THREAD_X'], tests: [{ want: { sh: { COMPUTE_NUM_THREAD_X: 4 } } }] },
+    sol: 'H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4', par: 3,
+  },
+  {
+    id: '8-2', book: 8, kind: '연습', title: '레지스터 둘',
+    text: 'SET_SH_REG 하나로 이어진 레지스터 여럿에 쓸 수 있어요 — 값을 늘리고 count도 늘려요. COMPUTE_NUM_THREAD_X = 4, 바로 다음 레지스터 COMPUTE_NUM_THREAD_Y = 1.',
+    hints: ['본문 = 레지스터 자리 + 값 둘 → dword 셋 → count 2.', 'H SET_SH_REG 2 · R COMPUTE_NUM_THREAD_X · V 4 · V 1.'],
+    pm4: { ops: ['SET_SH_REG'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y'], sh: { 0xb820: 0 }, tests: [{ want: { sh: { COMPUTE_NUM_THREAD_X: 4, COMPUTE_NUM_THREAD_Y: 1 } } }] },
+    sol: 'H SET_SH_REG 2; R COMPUTE_NUM_THREAD_X; V 4; V 1', par: 4,
+  },
+  {
+    id: '8-3', book: 8, kind: '개념', title: '커널 주소와 인자',
+    text: '「두 배 커널」(7-2)이 GPU 주소 0x1800에 있어요. COMPUTE_PGM_LO엔 주소를 256으로 나눈 값(아래 8비트를 뗀 값, 0x18)을 써요 — 셰이더 코드는 256바이트 경계에 놓이니까요. 그리고 커널이 s0으로 받을 값(쓸 배열 시작 16)을 COMPUTE_USER_DATA_0에. 웨이브가 시작할 때 USER_DATA_0이 s0에 들어가요. 두 레지스터는 이어져 있지 않아서 패킷 둘.',
+    hints: ['SET_SH_REG 둘: PGM_LO ← 0x18, USER_DATA_0 ← 16.', 'H SET_SH_REG 1 · R COMPUTE_PGM_LO · V 0x18 · H SET_SH_REG 1 · R COMPUTE_USER_DATA_0 · V 16.'],
+    pm4: { ops: ['SET_SH_REG'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], tests: [{ want: { sh: { COMPUTE_PGM_LO: 0x18, COMPUTE_USER_DATA_0: 16 } } }] },
+    sol: 'H SET_SH_REG 1; R COMPUTE_PGM_LO; V 0x18; H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 16', par: 6,
+  },
+  {
+    id: '8-4', book: 8, kind: '개념', title: '디스패치',
+    text: '이제 커널을 돌려요. PGM_LO·NUM_THREAD_X·USER_DATA_0을 쓰고 DISPATCH_DIRECT(0x15): 본문은 DIM_X·DIM_Y·DIM_Z(워크그룹 수)와 DISPATCH_INITIATOR(0번 자리 COMPUTE_SHADER_EN = 1). 작업 16개 = 워크그룹 4개 × 4. 7-2 커널이 기억[0~15]의 두 배를 기억[16~31]에 써요. (Y·Z 크기는 이미 1.)',
+    hints: ['SET_SH_REG 셋(각 count 1) + DISPATCH_DIRECT(본문 넷, count 3).', 'H SET_SH_REG 1 · R COMPUTE_PGM_LO · V 0x18 · H SET_SH_REG 1 · R COMPUTE_NUM_THREAD_X · V 4 · H SET_SH_REG 1 · R COMPUTE_USER_DATA_0 · V 16 · H DISPATCH_DIRECT 3 · V 4 · V 1 · V 1 · V 1.'],
+    pm4: { ops: ['SET_SH_REG', 'DISPATCH_DIRECT'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1 }, tests: [{ mem: { 0: 3, 1: 10, 2: 17, 3: 24, 4: 31, 5: 38, 6: 45, 7: 2, 8: 9, 9: 16, 10: 23, 11: 30, 12: 37, 13: 44, 14: 1, 15: 8 }, want: { mem: { 16: 6, 17: 20, 18: 34, 19: 48, 20: 62, 21: 76, 22: 90, 23: 4, 24: 18, 25: 32, 26: 46, 27: 60, 28: 74, 29: 88, 30: 2, 31: 16 } } }] },
+    sol: 'H SET_SH_REG 1; R COMPUTE_PGM_LO; V 0x18; H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4; H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 16; H DISPATCH_DIRECT 3; V 4; V 1; V 1; V 1', par: 14,
+  },
+  {
+    id: '8-5', book: 8, kind: '연습', title: '벡터 더하기 맡기기',
+    text: '「벡터 더하기 커널」(7-5)은 GPU 주소 0x2400. 이 커널은 s0으로 커널 인자 주소(기억[28], 거기에 a·b·c 시작)를 받아요. 작업 8개 = 워크그룹 2개.',
+    hints: ['8-4와 같은 모양 — PGM_LO 0x24, USER_DATA_0 28, DIM_X 2.', 'H SET_SH_REG 1 · R COMPUTE_PGM_LO · V 0x24 · H SET_SH_REG 1 · R COMPUTE_NUM_THREAD_X · V 4 · H SET_SH_REG 1 · R COMPUTE_USER_DATA_0 · V 28 · H DISPATCH_DIRECT 3 · V 2 · V 1 · V 1 · V 1.'],
+    pm4: { ops: ['SET_SH_REG', 'DISPATCH_DIRECT'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1 }, tests: [{ mem: { 28: 0, 29: 8, 30: 16, 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 10, 9: 20, 10: 30, 11: 40, 12: 50, 13: 60, 14: 70, 15: 80 }, want: { mem: { 16: 11, 17: 22, 18: 33, 19: 44, 20: 55, 21: 66, 22: 77, 23: 88 } } }, { mem: { 28: 8, 29: 0, 30: 16, 8: 1, 9: 1, 10: 1, 11: 1, 12: 2, 13: 2, 14: 2, 15: 2, 0: 10, 1: 20, 2: 30, 3: 40, 4: 50, 5: 60, 6: 70, 7: 80 }, want: { mem: { 16: 11, 17: 21, 18: 31, 19: 41, 20: 52, 21: 62, 22: 72, 23: 82 } } }] },
+    sol: 'H SET_SH_REG 1; R COMPUTE_PGM_LO; V 0x24; H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4; H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 28; H DISPATCH_DIRECT 3; V 2; V 1; V 1; V 1', par: 14,
+  },
+  {
+    id: '8-6', book: 8, kind: '개념', title: '링 버퍼와 도어벨',
+    text: '패킷은 링 버퍼(여기선 16 dword)에 써요. CP는 rptr(다음에 읽을 자리)부터 wptr(쓴 끝)까지만 읽어요. CPU가 패킷을 다 쓰고 도어벨에 새 wptr를 알려야 CP가 읽기 시작해요. 지금 rptr = wptr = 0. 8-1 패킷을 쓰고 도어벨을 울려요.',
+    hints: ['dword 셋을 썼으면 새 wptr = 3.', 'H SET_SH_REG 1 · R COMPUTE_NUM_THREAD_X · V 4, 도어벨 3.'],
+    pm4: { doorbell: true, ops: ['SET_SH_REG', 'NOP'], regs: ['COMPUTE_NUM_THREAD_X'], tests: [{ want: { sh: { COMPUTE_NUM_THREAD_X: 4 }, rptr: 3 } }] },
+    sol: 'H SET_SH_REG 1; R COMPUTE_NUM_THREAD_X; V 4; DB 3', par: 3,
+  },
+  {
+    id: '8-7', book: 8, kind: '연습', title: '링 감기',
+    text: '이번엔 rptr = wptr = 14. 8-2 패킷(dword 넷)을 쓰면 14·15 다음 0·1로 감겨요. 도어벨엔 감긴 뒤의 wptr.',
+    hints: ['(14 + 4) 를 16으로 나눈 나머지.', '8-2 패킷 그대로, 도어벨 2.'],
+    pm4: { doorbell: true, rptr: 14, ops: ['SET_SH_REG', 'NOP'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y'], sh: { 0xb820: 0 }, tests: [{ want: { sh: { COMPUTE_NUM_THREAD_X: 4, COMPUTE_NUM_THREAD_Y: 1 }, rptr: 2 } }] },
+    sol: 'H SET_SH_REG 2; R COMPUTE_NUM_THREAD_X; V 4; V 1; DB 2', par: 4,
+  },
+  {
+    id: '8-8', book: 8, kind: '개념', title: '펜스',
+    text: 'CPU는 GPU 일이 언제 끝났는지 어떻게 알까요? RELEASE_MEM(0x49)은 이 큐에서 앞서 낸 일이 끝나면 기억에 값을 써요 — CPU는 그 칸(펜스)을 보고 알아요. 게임의 RELEASE_MEM은 커널 완료와 CPU가 결과를 볼 수 있는 것까지 보장해요(실제로는 거기에 맞는 이벤트·캐시 동작·쓰기 옵션을 골라야 해요). 두 배 커널을 워크그룹 2개로 돌리고(PGM_LO·NUM_THREAD_X는 이미 설정됨), 끝나면 기억[31]에 1. RELEASE_MEM 본문은 이 게임에선 [주소, 값] 둘이에요(단순화).',
+    hints: ['USER_DATA_0 ← 16, DISPATCH_DIRECT(2,1,1,1), RELEASE_MEM(31, 1).', 'H SET_SH_REG 1 · R COMPUTE_USER_DATA_0 · V 16 · H DISPATCH_DIRECT 3 · V 2 · V 1 · V 1 · V 1 · H RELEASE_MEM 1 · V 31 · V 1.'],
+    pm4: { ops: ['SET_SH_REG', 'DISPATCH_DIRECT', 'RELEASE_MEM'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1, 0xb81c: 4, 0xb830: 0x18 }, tests: [{ mem: { 0: 2, 1: 7, 2: 12, 3: 17, 4: 22, 5: 27, 6: 32, 7: 37 }, want: { mem: { ...{ 16: 4, 17: 14, 18: 24, 19: 34, 20: 44, 21: 54, 22: 64, 23: 74 }, 31: 1 } } }] },
+    sol: 'H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 16; H DISPATCH_DIRECT 3; V 2; V 1; V 1; V 1; H RELEASE_MEM 1; V 31; V 1', par: 11,
+  },
+  {
+    id: '8-9', book: 8, kind: '개념', title: '기다리기',
+    text: '반대로 GPU가 CPU를 기다릴 때도 있어요. CPU가 입력 기억[0~7]을 다 쓰면 기억[30]에 1을 써요 — 조금 늦게(5틱 뒤). WAIT_REG_MEM(0x3C)으로 「기억[30] AND 마스크 = 1」이 될 때까지 CP를 세워 두고 디스패치해요. 레지스터는 다 설정돼 있어요. 본문은 이 게임에선 [함수 3(같음), 주소, 기준값, 마스크](단순화). 게임은 CPU가 입력을 GPU에 보이게 만든 뒤 표시를 쓴다고 가정해요 — 실제 WAIT_REG_MEM은 값 조건만 기다리고, CPU 쓰기의 순서·가시성과 GPU 캐시 처리는 따로 보장해야 해요.',
+    hints: ['WAIT_REG_MEM(3, 30, 1, 255) 다음에 DISPATCH_DIRECT(2,1,1,1).', 'H WAIT_REG_MEM 3 · V 3 · V 30 · V 1 · V 255 · H DISPATCH_DIRECT 3 · V 2 · V 1 · V 1 · V 1.'],
+    pm4: { ops: ['DISPATCH_DIRECT', 'WAIT_REG_MEM', 'RELEASE_MEM', 'NOP'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1, 0xb81c: 4, 0xb830: 0x18, 0xb900: 16 }, tests: [{ env: [{ tick: 5, mem: { ...{ 0: 2, 1: 7, 2: 12, 3: 17, 4: 22, 5: 27, 6: 32, 7: 37 }, 30: 1 } }], want: { mem: { 16: 4, 17: 14, 18: 24, 19: 34, 20: 44, 21: 54, 22: 64, 23: 74 } } }] },
+    sol: 'H WAIT_REG_MEM 3; V 3; V 30; V 1; V 255; H DISPATCH_DIRECT 3; V 2; V 1; V 1; V 1', par: 10,
+  },
+  {
+    id: '8-10', book: 8, kind: '개념', title: '캐시 비우기',
+    text: 'CPU가 입력을 새로 썼는데, GPU 캐시엔 지난번 옛값(전부 1)이 남아 있어요. 그대로 돌리면 옛값을 읽어요. ACQUIRE_MEM(0x58)으로 게임의 읽기 캐시를 무효화하고 디스패치해요(게임은 CPU의 새 값이 이미 기억까지 왔다고 가정해요 — 실제 명령은 대상 캐시·범위와 무효화·쓰기 되돌리기 동작을 지정해요. 여기서 쓰는 캐시 무효화용 ACQUIRE_MEM은 앞 셰이더가 끝나는 것까지 보장하지 않아요). 레지스터는 다 설정돼 있어요. 본문은 이 게임에선 [1] 하나(단순화).',
+    hints: ['ACQUIRE_MEM 다음에 DISPATCH_DIRECT.', 'H ACQUIRE_MEM 0 · V 1 · H DISPATCH_DIRECT 3 · V 2 · V 1 · V 1 · V 1.'],
+    pm4: { ops: ['DISPATCH_DIRECT', 'ACQUIRE_MEM', 'WAIT_REG_MEM', 'RELEASE_MEM', 'NOP'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1, 0xb81c: 4, 0xb830: 0x18, 0xb900: 16 }, tests: [{ mem: { 0: 2, 1: 7, 2: 12, 3: 17, 4: 22, 5: 27, 6: 32, 7: 37 }, stale: { 0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1 }, want: { mem: { 16: 4, 17: 14, 18: 24, 19: 34, 20: 44, 21: 54, 22: 64, 23: 74 } } }] },
+    sol: 'H ACQUIRE_MEM 0; V 1; H DISPATCH_DIRECT 3; V 2; V 1; V 1; V 1', par: 7,
+  },
+  {
+    id: '8-11', book: 8, kind: '개념', title: '간접 버퍼',
+    text: '명령 묶음을 기억에 미리 만들어 두고(IB, indirect buffer), 링엔 「그걸 읽어라」만 쓸 수 있어요. RADV에선 Vulkan 커맨드 버퍼에 기록한 명령이 이런 PM4 IB들로 구현돼요(10부) — Vulkan 객체 하나가 꼭 IB 하나와 같은 건 아니에요. 주소 0x40에 IB가 있어요: USER_DATA_0 ← 16과 DISPATCH_DIRECT(2,1,1,1), 모두 8 dword. INDIRECT_BUFFER(0x3F) 본문 = [주소 아래 32비트, 주소 위 32비트, 크기].',
+    hints: ['주소 0x40 = 64, 위는 0, 크기 8.', 'H INDIRECT_BUFFER 2 · V 0x40 · V 0 · V 8.'],
+    pm4: { ops: ['INDIRECT_BUFFER', 'DISPATCH_DIRECT', 'SET_SH_REG', 'NOP'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1, 0xb81c: 4, 0xb830: 0x18 }, ibs: { 0x40: 'H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 16; H DISPATCH_DIRECT 3; V 2; V 1; V 1; V 1' }, tests: [{ mem: { 0: 2, 1: 7, 2: 12, 3: 17, 4: 22, 5: 27, 6: 32, 7: 37 }, want: { mem: { 16: 4, 17: 14, 18: 24, 19: 34, 20: 44, 21: 54, 22: 64, 23: 74 } } }] },
+    sol: 'H INDIRECT_BUFFER 2; V 0x40; V 0; V 8', par: 4,
+  },
+  {
+    id: '8-12', book: 8, kind: '연습', title: '한 벌 제출',
+    text: '다 합쳐요. 링 32 dword, rptr = wptr = 24. 캐시 무효화 → 벡터 더하기 커널(0x2400, 인자 주소 28, 워크그룹 2) → 끝나면 기억[31] ← 1, 그리고 도어벨. NUM_THREAD_X는 이미 4. 패킷이 링 끝을 넘어 감겨요.',
+    hints: ['ACQUIRE_MEM · SET_SH_REG(PGM_LO) · SET_SH_REG(USER_DATA_0) · DISPATCH_DIRECT · RELEASE_MEM — 모두 16 dword, 도어벨 = (24 + 16) mod 32.', 'H ACQUIRE_MEM 0 · V 1 · H SET_SH_REG 1 · R COMPUTE_PGM_LO · V 0x24 · H SET_SH_REG 1 · R COMPUTE_USER_DATA_0 · V 28 · H DISPATCH_DIRECT 3 · V 2 · V 1 · V 1 · V 1 · H RELEASE_MEM 1 · V 31 · V 1, 도어벨 8.'],
+    pm4: { ring: 32, rptr: 24, doorbell: true, ops: ['SET_SH_REG', 'DISPATCH_DIRECT', 'NOP', 'RELEASE_MEM', 'WAIT_REG_MEM', 'ACQUIRE_MEM', 'INDIRECT_BUFFER'], regs: ['COMPUTE_NUM_THREAD_X', 'COMPUTE_NUM_THREAD_Y', 'COMPUTE_PGM_LO', 'COMPUTE_USER_DATA_0'], sh: { 0xb820: 1, 0xb824: 1, 0xb81c: 4 }, tests: [{ mem: { 28: 0, 29: 8, 30: 16, 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 10, 9: 20, 10: 30, 11: 40, 12: 50, 13: 60, 14: 70, 15: 80 }, stale: { 0: 9, 1: 9 }, want: { mem: { ...{ 16: 11, 17: 22, 18: 33, 19: 44, 20: 55, 21: 66, 22: 77, 23: 88 }, 31: 1 } } }, { mem: { 28: 8, 29: 0, 30: 16, 8: 1, 9: 1, 10: 1, 11: 1, 12: 2, 13: 2, 14: 2, 15: 2, 0: 10, 1: 20, 2: 30, 3: 40, 4: 50, 5: 60, 6: 70, 7: 80 }, want: { mem: { ...{ 16: 11, 17: 21, 18: 31, 19: 41, 20: 52, 21: 62, 22: 72, 23: 82 }, 31: 1 } } }] },
+    sol: 'H ACQUIRE_MEM 0; V 1; H SET_SH_REG 1; R COMPUTE_PGM_LO; V 0x24; H SET_SH_REG 1; R COMPUTE_USER_DATA_0; V 28; H DISPATCH_DIRECT 3; V 2; V 1; V 1; V 1; H RELEASE_MEM 1; V 31; V 1; DB 8', par: 16,
+  },
+  {
+    id: '8-13', book: 8, kind: '시험', title: '8부 시험', pool: ['8-4', '8-8', '8-11'], rounds: 3,
+    text: '8부의 패킷 짜기 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 9부(드라이버)로 가요.',
   },
 ];

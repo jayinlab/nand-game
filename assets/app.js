@@ -1,8 +1,10 @@
-import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, SCHED_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN } from './stages.js';
+import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, SCHED_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN, PM4_OPS, SH_REGS, PM4_NOTE, KERNELS, parsePm4, dwordOf, pm4Run, hex8, regOff } from './stages.js';
 
 const app = document.getElementById('app');
 const SAVE = 'nand-game:v1';
-const ALL = new URLSearchParams(location.search).has('all'); // 확인용: 잠금 없이 전부
+const ALLKEY = 'nand-game:all';
+let ALL = new URLSearchParams(location.search).has('all'); // 확인용: 잠금 없이 전부
+try { if (localStorage.getItem(ALLKEY) === '1') ALL = true; } catch (e) { /* 없어도 됨 */ }
 
 // ---------- 저장 ----------
 let save = {};
@@ -119,6 +121,7 @@ function specOf() {
   }
   const t = cur.sub || s;
   if (t.asm) return { asm: true, ins: [], outs: [] };
+  if (t.pm4) return { pm4: true, ins: [], outs: [] };
   if (t.steps) {
     const steps = t.steps.map((x) => [...x].map(Number)), st = {};
     return { ins: t.ins, outs: t.outs, seq: true, steps, want: steps.map((x) => t.model(st, x).map((v) => (v == null ? null : v ? 1 : 0))) };
@@ -137,6 +140,12 @@ function pickPool(s, prev) {
 // 스테이지(또는 이번에 뽑힌 문제)에 맞춰 입력·프로그램·기계를 준비한다
 function setupTask() {
   const t = cur.sub || cur.s;
+  if (t.pm4) {
+    const v = rec(cur.s.id);
+    cur.prog = !temp(cur.s) && v.prog ? JSON.parse(JSON.stringify(v.prog)) : [];
+    cur.db = !temp(cur.s) && v.db != null ? v.db : null;
+    cur.asel = null; cur.tsel = 0;
+  }
   if (t.asm) {
     const v = rec(cur.s.id);
     cur.prog = !temp(cur.s) && v.prog ? JSON.parse(JSON.stringify(v.prog)) : [];
@@ -337,6 +346,7 @@ function truthTable(spec) {
 }
 
 function renderStage() {
+  if ((cur.sub || cur.s).pm4) return renderPm4();
   if ((cur.sub || cur.s).asm) return renderAsm();
   const { s, i } = cur;
   const spec = specOf();
@@ -435,8 +445,8 @@ function changeProg(fn) {
   if (cur.undo.length > 60) cur.undo.shift();
   fn();
   cur.msg = ''; cur.pass = false;
-  cur.m = machInit(cur.sub || cur.s, cur.tsel);
-  if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; persist(); }
+  if (!(cur.sub || cur.s).pm4) cur.m = machInit(cur.sub || cur.s, cur.tsel);
+  if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; rec(cur.s.id).db = cur.db; persist(); }
 }
 
 function renderAsm() {
@@ -537,6 +547,105 @@ function renderAsm() {
   h += checkHtml();
   app.innerHTML = h;
   hookHints();
+}
+
+// ---------- 8부 PM4 ----------
+const OPLIST = (t) => t.pm4.ops, REGLIST = (t) => t.pm4.regs;
+const NAMEOF = Object.fromEntries(Object.entries(SH_REGS).map(([k, v]) => [v, k]));
+function pm4Ok(x, r) {
+  if (r.err) return false;
+  const w = x.want || {};
+  for (const [k, v] of Object.entries(w.mem || {})) if (r.mem[k] !== v) return false;
+  for (const [k, v] of Object.entries(w.sh || {})) if (r.sh[SH_REGS[k]] !== v) return false;
+  if (w.rptr != null && r.rptr !== w.rptr) return false;
+  return true;
+}
+const runPm4 = (t, k) => pm4Run(t.pm4, cur.prog.map(dwordOf), cur.db, t.pm4.tests[k]);
+// 편집기에서 각 dword가 무엇인지(쓴 사람 쪽 뜻)
+function dwMeaning(prog) {
+  const out = []; let left = 0, op = null, idx = 0;
+  for (const d of prog) {
+    if (d.k === 'h') { out.push(`헤더 · ${d.op} · 본문 ${d.count + 1}`); left = d.count + 1; op = d.op; idx = 0; continue; }
+    const tag = left > 0 ? `${op} ${++idx}` : '본문 밖?';
+    left--;
+    out.push(d.k === 'r' ? `${tag} · ${d.reg.replace("COMPUTE_", "")}` : `${tag} · ${d.n}`);
+  }
+  return out;
+}
+function renderPm4() {
+  const s = cur.s, t = cur.sub || s, v = rec(s.id), prog = cur.prog, a = cur.asel, P = t.pm4, N = P.ring || 16, r0 = P.rptr || 0;
+  const mean = dwMeaning(prog);
+  let h = headHtml();
+  h += `<div class="asm"><p class="ttnote">링 ${N} dword · rptr = ${r0}${P.doorbell ? ` · wptr = ${r0}(도어벨 전)` : ''} — 내가 쓰는 dword는 ${r0}번 칸부터 놓여요</p><ol class="prog pm4">`;
+  prog.forEach((d, k) => {
+    h += `<li data-a="psel" data-line="${k}" class="${k === a ? 'sel' : ''}"><span class="ln">${(r0 + k) % N}</span><span class="hex">${hex8(dwordOf(d))}</span><span class="mean">${mean[k]}</span></li>`;
+  });
+  h += '</ol>';
+  if (!prog.length) h += '<p class="empty">아래 단추로 dword를 쌓아요 — 헤더 · 레지스터 · 값.</p>';
+  if (a != null && prog[a]) {
+    const d = prog[a];
+    h += `<div class="lineedit"><span>${(r0 + a) % N}번 칸</span>`;
+    if (d.k === 'h') h += `<span class="argbox"><button data-a="popd">◀</button><b>${d.op}</b><button data-a="popu">▶</button></span><span class="argbox"><button data-a="pcd">−</button><b>count ${d.count}</b><button data-a="pcu">+</button></span>`;
+    else if (d.k === 'r') h += `<span class="argbox"><button data-a="pregd">◀</button><b>${d.reg}</b><button data-a="pregu">▶</button></span>`;
+    else h += `<span class="argbox"><button data-a="pvd">−</button><input data-a="pvalin" inputmode="text" value="${d.n >= 16 ? '0x' + d.n.toString(16) : d.n}" size="7"><button data-a="pvu">+</button></span>`;
+    h += `<button data-a="pup" ${a ? '' : 'disabled'}>↑</button><button data-a="pdown" ${a < prog.length - 1 ? '' : 'disabled'}>↓</button><button data-a="pdel" class="warn">지우기</button></div>`;
+  }
+  h += `<div class="tools"><button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button><button data-a="reset" ${prog.length ? '' : 'disabled'}>처음부터</button></div>`;
+  const full = prog.length >= N;
+  h += `<div class="palette"><button data-a="paddh" ${full ? 'disabled' : ''}>헤더 +</button><button data-a="paddr" ${full ? 'disabled' : ''}>레지스터 +</button><button data-a="paddv" ${full ? 'disabled' : ''}>값 +</button></div>`;
+  if (P.doorbell) h += `<div class="lineedit doorbell"><span>도어벨(새 wptr)</span><span class="argbox"><button data-a="pdbd">−</button><b>${cur.db == null ? '–' : cur.db}</b><button data-a="pdbu">+</button></span></div>`;
+  h += `<details class="isa"><summary>명령 표</summary><dl>${OPLIST(t).map((o) => `<dt>${o} <small>0x${PM4_OPS[o].code.toString(16).toUpperCase()}</small></dt><dd>${PM4_OPS[o].desc}<br><small>본문: ${PM4_OPS[o].body}</small></dd>`).join('')}</dl></details>`;
+  h += `<details class="isa"><summary>레지스터 표</summary><dl>${REGLIST(t).map((r) => `<dt>${r}</dt><dd>주소 0x${SH_REGS[r].toString(16).toUpperCase()} · 자리 0x${regOff(r).toString(16).toUpperCase()}</dd>`).join('')}</dl><p class="ttnote">커널 창고: ${Object.entries(KERNELS).map(([ad, K]) => `0x${(+ad).toString(16).toUpperCase()} ${K.name} — ${K.args}`).join(' · ')}</p></details>`;
+  h += `<details class="isa"><summary>단순화한 것</summary><p class="ttnote">${PM4_NOTE}</p></details>`;
+  h += `<p class="cost">${prog.length} dword${s.par ? ` · 별 두 개는 ${s.par} dword 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''}</p></div>`;
+  // CP가 읽은 것
+  h += '<div class="mach">';
+  if (P.tests.length > 1) h += `<div class="chips">${P.tests.map((_, k) => `<button data-a="ptest" data-t="${k}" class="chip${k === cur.tsel ? ' on' : ''}">입력 ${k + 1}</button>`).join('')}</div>`;
+  const x = P.tests[cur.tsel], r = runPm4(t, cur.tsel);
+  h += `<p class="wavehd">CP가 읽은 것 · rptr ${r0} → ${r.err ? '멈춤' : r.rptr}</p><ol class="cplog">${r.log.map((l) => `<li>${l}</li>`).join('')}${r.err ? `<li class="bad">${r.err}</li>` : ''}${!r.log.length && !r.err ? '<li class="none">(읽은 패킷 없음)</li>' : ''}</ol>`;
+  const shs = Object.entries(r.sh).filter(([ad]) => NAMEOF[ad]).map(([ad, val]) => `<span>${NAMEOF[ad].replace('COMPUTE_', '')} <b>${val >= 16 ? '0x' + val.toString(16) : val}</b></span>`);
+  if (shs.length) h += `<div class="sregs">${shs.join('')}</div>`;
+  const wantM = (x.want || {}).mem || {}, init = Array.from({ length: MEMN }, (_, i) => (x.mem && x.mem[i]) || 0);
+  if (Object.keys(wantM).length || x.mem) h += '<p class="wavehd">기억</p><div class="ram">' + r.mem.map((y, k) => `<div class="cell${y !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}${k in wantM ? ' goal' : ''}"><small>[${k}]</small>${y}</div>`).join('') + '</div>';
+  h += '</div>';
+  // 시험 표
+  h += '<table class="tt asmt"><thead><tr><th>#</th><th>입력</th><th class="want gap">원함</th><th class="gap">지금</th></tr></thead><tbody>';
+  P.tests.forEach((y, k) => {
+    const rr = runPm4(t, k), ok = prog.length && pm4Ok(y, rr), w = y.want || {};
+    const inTxt = [memTxt(y.mem), y.stale ? `캐시 옛값 ${memTxt(y.stale)}` : '', (y.env || []).map((e) => `${e.tick}틱 뒤 CPU가 ${memTxt(e.mem)}`).join(' ')].filter(Boolean).join(' · ') || '–';
+    const wTxt = [memTxt(w.mem), Object.entries(w.sh || {}).map(([n, val]) => `${n.replace('COMPUTE_', '')}=${val}`).join(' '), w.rptr != null ? `rptr=${w.rptr}` : ''].filter(Boolean).join(' · ');
+    const got = rr.err ? '멈춤' : [memTxt(Object.fromEntries(Object.keys(w.mem || {}).map((j) => [j, rr.mem[j]]))), Object.keys(w.sh || {}).map((n) => `${n.replace('COMPUTE_', '')}=${rr.sh[SH_REGS[n]] ?? '–'}`).join(' '), w.rptr != null ? `rptr=${rr.rptr}` : ''].filter(Boolean).join(' · ');
+    h += `<tr data-a="ptest" data-t="${k}" class="${k === cur.tsel ? 'cur' : ''}"><td>${k + 1}</td><td>${inTxt}</td><td class="want gap">${wTxt}</td><td class="gap ${prog.length ? (ok ? 'ok' : 'bad') : 'none'}">${prog.length ? got : '–'}</td></tr>`;
+  });
+  h += '</tbody></table>';
+  h += checkHtml();
+  app.innerHTML = h;
+  hookHints();
+}
+function checkPm4() {
+  const t = cur.sub || cur.s;
+  if (!cur.prog.length) { cur.msg = '아직 dword가 없어요.'; return false; }
+  let bad = 0, err = '';
+  t.pm4.tests.forEach((x, k) => { const r = runPm4(t, k); if (r.err) err = r.err; if (!pm4Ok(x, r)) bad++; });
+  if (bad) { cur.msg = `입력 ${t.pm4.tests.length}개 중 ${bad}개가 달라요.${err ? ' ' + err : ''}`; return false; }
+  return true;
+}
+function pm4Action(a, t) {
+  const T = cur.sub || cur.s, prog = cur.prog, k = cur.asel, ops = OPLIST(T), regs = REGLIST(T);
+  const cyc = (list, x, d) => list[(list.indexOf(x) + d + list.length) % list.length];
+  const add = (d) => { const at = k == null ? prog.length : k + 1; changeProg(() => prog.splice(at, 0, d)); cur.asel = at; };
+  if (a === 'paddh') add({ k: 'h', op: ops[0], count: 0 });
+  else if (a === 'paddr') add({ k: 'r', reg: regs[0] });
+  else if (a === 'paddv') add({ k: 'v', n: 0 });
+  else if (a === 'psel') { const j = +t.dataset.line; cur.asel = cur.asel === j ? null : j; }
+  else if (a === 'popu' || a === 'popd') changeProg(() => { prog[k].op = cyc(ops, prog[k].op, a === 'popu' ? 1 : -1); });
+  else if (a === 'pcu' || a === 'pcd') changeProg(() => { prog[k].count = Math.max(0, Math.min(15, prog[k].count + (a === 'pcu' ? 1 : -1))); });
+  else if (a === 'pregu' || a === 'pregd') changeProg(() => { prog[k].reg = cyc(regs, prog[k].reg, a === 'pregu' ? 1 : -1); });
+  else if (a === 'pvu' || a === 'pvd') changeProg(() => { prog[k].n = Math.max(0, prog[k].n + (a === 'pvu' ? 1 : -1)); });
+  else if (a === 'pup' || a === 'pdown') { const j = a === 'pup' ? k - 1 : k + 1; changeProg(() => { [prog[k], prog[j]] = [prog[j], prog[k]]; }); cur.asel = j; }
+  else if (a === 'pdel') { changeProg(() => prog.splice(k, 1)); cur.asel = prog.length ? Math.min(k, prog.length - 1) : null; }
+  else if (a === 'pdbu' || a === 'pdbd') { const N = T.pm4.ring || 16; cur.db = ((cur.db ?? (T.pm4.rptr || 0)) + (a === 'pdbu' ? 1 : -1) + N) % N; cur.msg = ''; cur.pass = false; if (!temp(cur.s)) { rec(cur.s.id).db = cur.db; persist(); } }
+  else if (a === 'ptest') cur.tsel = +t.dataset.t;
 }
 
 function checkAsm() {
@@ -648,6 +757,13 @@ function nearRandom(spec) {
 
 function near() {
   const s = cur.s, spec = specOf(), t = cur.sub || s;
+  if (t.pm4) {
+    const sol = parsePm4(t.sol).dw, keep = Math.max(1, sol.length - Math.ceil(sol.length / 3));
+    changeProg(() => { cur.prog.splice(0, cur.prog.length, ...sol.slice(0, keep)); });
+    cur.asel = null;
+    cur.nearMsg = `앞 ${keep} dword를 놓았어요 — 나머지 ${sol.length - keep} dword를 이어 써요${t.pm4.doorbell ? '(도어벨도)' : ''}.`;
+    return;
+  }
   if (t.asm) {
     const sol = parseSol(t), keep = Math.max(1, sol.length - Math.ceil(sol.length / 3));
     changeProg(() => { cur.prog.splice(0, cur.prog.length, ...sol.slice(0, keep)); });
@@ -681,6 +797,7 @@ function checkSeq(spec) {
 
 function check() {
   const spec = specOf(), n = spec.ins.length;
+  if (spec.pm4) { if (!checkPm4()) return; return passed(); }
   if (spec.asm) { if (!checkAsm()) return; return passed(); }
   if (spec.seq) { if (!checkSeq(spec)) return; return passed(); }
   let bad = 0, cyc = false;
@@ -699,7 +816,7 @@ function check() {
 }
 
 function passed() {
-  const s = cur.s, asm = !!(cur.sub || s).asm, cost = asm ? cur.prog.length : costOf(cur.circ);
+  const s = cur.s, T = cur.sub || s, asm = !!(T.asm || T.pm4), cost = asm ? cur.prog.length : costOf(cur.circ);
   cur.pass = true;
   cur.share = null;
   cur.sel = null;
@@ -714,7 +831,7 @@ function passed() {
   if (s.par && (v.best == null || cost < v.best)) v.best = cost;
   persist();
   let m = s.rounds ? `${s.rounds}번 연달아 맞았어요!` : '맞았어요!';
-  const unit = asm ? '줄' : '개', what = asm ? `${cost}줄` : `NAND ${cost}개 몫`;
+  const pm = !!(cur.sub || s).pm4, unit = pm ? ' dword' : asm ? '줄' : '개', what = pm ? `${cost} dword` : asm ? `${cost}줄` : `NAND ${cost}개 몫`;
   if (s.par) m += cost <= s.par ? ` ${what} — 별 두 개.` : ` ${what}. ${s.par}${unit} 이하면 별 하나 더.`;
   if (first && s.unlock) m += ` 이제부터 <b>${s.unlock}</b>를 상자 하나로 써요.`;
   cur.msg = m;
@@ -766,12 +883,14 @@ function tapTarget(t) {
   if (a) {
     if (['aop', 'asel', 'ainc', 'adec', 'aup', 'adown', 'adel', 'atest', 'astep', 'arun', 'areset'].includes(a)) {
       asmAction(a, t);
-    } else if (a === 'undo' && cur.undo.length && cur.prog && (cur.sub || cur.s).asm) {
+    } else if (a.startsWith('p') && a !== 'power' && (cur.sub || cur.s).pm4) {
+      pm4Action(a, t);
+    } else if (a === 'undo' && cur.undo.length && cur.prog && ((cur.sub || cur.s).asm || (cur.sub || cur.s).pm4)) {
       cur.prog = JSON.parse(cur.undo.pop());
       if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; persist(); }
       cur.asel = null; cur.msg = ''; cur.pass = false;
-      cur.m = machInit(cur.sub || cur.s, cur.tsel);
-    } else if (a === 'reset' && (cur.sub || cur.s).asm) {
+      if (!(cur.sub || cur.s).pm4) cur.m = machInit(cur.sub || cur.s, cur.tsel);
+    } else if (a === 'reset' && ((cur.sub || cur.s).asm || (cur.sub || cur.s).pm4)) {
       changeProg(() => cur.prog.splice(0));
       cur.asel = null;
     } else if (a === 'undo' && cur.undo.length) {
@@ -858,6 +977,7 @@ function renderList() {
     }
     h += '</ol></section>';
   }
+  h += `<p class="unlock"><button data-a="unlock">${ALL ? '차례대로 열기로 돌아가기' : '모든 스테이지 열기(시험용)'}</button></p>`;
   h += `<footer class="foot">진행은 이 기기 브라우저에만 저장돼요. 5부(GPU)부터는 공개 자료(AMD ISA 문서·Mesa radv·amdgpu·Khronos 사양)로 확인한 것만 사실로 쓰고, 단순화는 그렇다고 적어요. AI(Claude)가 만들었어요.</footer>`;
   app.innerHTML = h;
 }
@@ -979,6 +1099,20 @@ app.addEventListener('pointercancel', (e) => endDrag(e, true));
 // iOS는 SVG 안 touch-action을 안 따를 때가 있어, 점·부품을 끄는 동안만 화면 넘김을 막는다
 app.addEventListener('touchmove', (e) => { if (drag && (drag.port || drag.part)) e.preventDefault(); }, { passive: false });
 
-app.addEventListener('click', (e) => { if (cur && !e.target.closest('svg.board-svg')) tap(e); });
+app.addEventListener('click', (e) => {
+  const u = e.target.closest('[data-a="unlock"]');
+  if (u && !cur) { ALL = !ALL; try { localStorage.setItem(ALLKEY, ALL ? '1' : '0'); } catch (er) { /* 없어도 됨 */ } return renderList(); }
+  if (e.target.tagName === 'INPUT') return; // 직접 넣기 칸은 change에서
+  if (cur && !e.target.closest('svg.board-svg')) tap(e);
+});
+// 8부 값 dword 직접 넣기
+app.addEventListener('change', (e) => {
+  const t = e.target;
+  if (!cur || t.dataset.a !== 'pvalin') return;
+  const v = /^0x[0-9a-f]+$/i.test(t.value.trim()) ? parseInt(t.value.trim(), 16) : parseInt(t.value.trim(), 10);
+  if (Number.isNaN(v) || cur.asel == null) return renderStage();
+  changeProg(() => { cur.prog[cur.asel].n = v >>> 0; });
+  renderStage();
+});
 window.addEventListener('hashchange', route);
 route();

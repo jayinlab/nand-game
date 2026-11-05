@@ -172,3 +172,15 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 /* 6부 CU */
 .wavehd { margin: 10px 0 2px; font-size: 13px; color: var(--mute); font-variant-numeric: tabular-nums; }
 .ram .cell.goal { border-width: 2px; border-color: var(--ink); }
+
+/* 8부 PM4 */
+.prog.pm4 li { grid-template-columns: 28px 104px 1fr; }
+.prog .hex { font-size: 13px; font-weight: 700; }
+.prog .mean { font-size: 12px; color: var(--mute); font-family: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.argbox input { width: 72px; font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); padding: 6px 4px; }
+.doorbell { margin-top: 10px; }
+.cplog { margin: 4px 0 8px; padding-left: 20px; font-size: 13px; }
+.cplog li { margin: 2px 0; }
+.cplog li.bad { color: var(--x); font-weight: 700; }
+.cplog li.none { color: var(--mute); }
+.unlock { text-align: center; margin: 18px 0 0; }
