@@ -1,4 +1,4 @@
-import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk } from './stages.js';
+import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun, VISA, LANES, VEC_NOTE, CU_NOTE, parseVec, vecInit, vecStep, vecRun, vecOk, cuInit, cuStep, cuRun, cuOk, MEMN, LDSN } from './stages.js';
 
 const app = document.getElementById('app');
 const SAVE = 'nand-game:v1';
@@ -399,11 +399,14 @@ function hookHints() {
 
 // ---------- 4부 어셈블리 ----------
 // 기계 둘: 4부 작은 컴퓨터(cpu) · 5부 작은 웨이브(vec). 편집기·시험 표는 같이 쓴다
+// 6부 작은 CU(cu)는 벡터 편집기를 같이 쓰고 기계만 다르다
 const isVec = (t) => !!t.asm.vec;
-const machInit = (t, k) => (isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
-const machStep = (t, prog, m) => (isVec(t) ? vecStep(prog, m) : asmStep(prog, m));
-const machRun = (t, prog, k) => (isVec(t) ? vecRun(prog, t.asm, t.asm.tests[k]) : asmRun(prog, ramOf(t, k)));
-const machOk = (t, x, m) => (isVec(t) ? vecOk(x, m) : testOk(x, m));
+const isCu = (t) => !!t.asm.cu;
+const machInit = (t, k) => (isCu(t) ? cuInit(t.asm, t.asm.tests[k] || {}) : isVec(t) ? vecInit(t.asm, t.asm.tests[k] || {}) : asmInit(ramOf(t, k)));
+const machStep = (t, prog, m) => (isCu(t) ? cuStep(prog, m) : isVec(t) ? vecStep(prog, m) : asmStep(prog, m));
+const machRun = (t, prog, k) => (isCu(t) ? cuRun(prog, t.asm, t.asm.tests[k]) : isVec(t) ? vecRun(prog, t.asm, t.asm.tests[k]) : asmRun(prog, ramOf(t, k)));
+const machOk = (t, x, m) => (isCu(t) ? cuOk(x, m) : isVec(t) ? vecOk(x, m) : testOk(x, m));
+const memTxt = (o) => Object.entries(o || {}).map(([k, v]) => `[${k}]=${v}`).join(' ');
 const parseSol = (t) => (isVec(t) ? parseVec(t.sol) : parseProg(t.sol));
 const VRANGE = { v: 4, s: 4, vs: 8, n: 16, k: 16 };
 const vArg = (kind, x) => (kind === 'v' ? `v${x}` : kind === 's' ? `s${x}` : kind === 'vs' ? (x < 4 ? `v${x}` : `s${x - 4}`) : kind === 'k' ? `→ ${x}` : `${x}`);
@@ -443,7 +446,8 @@ function renderAsm() {
   let h = headHtml();
   h += `<div class="asm"><ol class="prog${vec ? ' vec' : ''}">`;
   prog.forEach((l, k) => {
-    const cls = `${k === a ? 'sel' : ''}${k === m.pc && !m.halted && m.steps ? ' pc' : ''}`;
+    const pcs = isCu(t) ? m.waves.filter((w) => !w.halted).map((w) => w.pc) : [m.pc];
+    const cls = `${k === a ? 'sel' : ''}${pcs.includes(k) && !m.halted && m.steps ? ' pc' : ''}`;
     h += vec
       ? `<li data-a="asel" data-line="${k}" class="${cls}"><span class="ln">${k}</span><span class="vl"><b class="op">${l.op}</b> ${vLine(l)}</span></li>`
       : `<li data-a="asel" data-line="${k}" class="${cls}"><span class="ln">${k}</span><span class="op">${l.op}</span><span class="arg">${argTxt(l)}</span><span class="code">${codeOf(l)}</span></li>`;
@@ -460,7 +464,7 @@ function renderAsm() {
   h += `<div class="tools"><button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button><button data-a="reset" ${prog.length ? '' : 'disabled'}>처음부터</button></div>`;
   h += `<div class="palette${vec ? ' vpal' : ''}">${t.asm.ops.map((o) => `<button data-a="aop" data-op="${o}" ${prog.length >= 16 ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
   h += vec
-    ? `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VISA[o].args.join(', ')}</dt><dd>${VISA[o].desc} <small>실제: ${VISA[o].real}</small></dd>`).join('')}</dl><p class="ttnote">v = v0~v3(레인마다) · s = s0~s3(웨이브에 하나) · vs = 둘 중 아무거나 · n = 수 · k = 줄 번호</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VEC_NOTE}</p></details>`
+    ? `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o} ${VISA[o].args.join(', ')}</dt><dd>${VISA[o].desc} <small>실제: ${VISA[o].real}</small></dd>`).join('')}</dl><p class="ttnote">v = v0~v3(레인마다) · s = s0~s3(웨이브에 하나) · vs = 둘 중 아무거나 · n = 수 · k = 줄 번호</p></details><details class="isa"><summary>단순화한 것</summary><p class="ttnote">${VEC_NOTE}${isCu(t) ? `</p><p class="ttnote">${CU_NOTE}` : ''}</p></details>`
     : `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o}${ISA[o].arg ? ' ' + ISA[o].arg : ''}</dt><dd>${ISA[o].desc} <small>기계어 ${ISA[o].code.toString(16).toUpperCase()}_</small></dd>`).join('')}</dl></details>`;
   h += `<p class="cost">${prog.length}줄${s.par ? ` · 별 두 개는 ${s.par}줄 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''} · 최대 16줄</p></div>`;
 
@@ -468,7 +472,23 @@ function renderAsm() {
   h += '<div class="mach">';
   if (t.asm.tests.length > 1) h += `<div class="chips">${t.asm.tests.map((_, k) => `<button data-a="atest" data-t="${k}" class="chip${k === cur.tsel ? ' on' : ''}">입력 ${k + 1}</button>`).join('')}</div>`;
   const state = m.halted ? `멈춤 · ${m.steps}걸음` : m.steps >= 2000 ? '안 멈춰요' : m.steps ? `${m.steps}걸음` : '처음';
-  if (vec) {
+  if (isCu(t)) {
+    const cst = m.halted ? `끝 · ${m.t}사이클` : m.steps >= 2000 ? "안 멈춰요" : m.t ? `${m.t}사이클` : '처음';
+    h += `<div class="regs"><span>${cst}</span><span>오는 중 <b>${m.pending.length}</b></span></div>`;
+    for (const w of m.waves) {
+      const st = w.halted ? '끝' : w.wait === 'cnt' ? '읽기 기다림' : w.wait === 'bar' ? '배리어' : m.cur === w.w ? '도는 중' : '쉬는 중';
+      h += `<p class="wavehd">${m.waves.length > 1 ? `웨이브 ${w.w} · ` : ''}PC ${w.pc} · ${st} · ${w.s.map((x, k) => `s${k}=${x}`).join(' ')}</p>`;
+      h += '<table class="lanes"><thead><tr><th>id</th><th>EXEC</th><th>VCC</th><th>v1</th><th>v2</th><th>v3</th></tr></thead><tbody>';
+      for (let l = 0; l < LANES; l++) {
+        const on = (w.exec >> l) & 1;
+        h += `<tr class="${on ? '' : 'off'}"><td>${w.v[0][l]}</td><td class="bit${on ? ' on' : ''}">${on}</td><td class="bit${(w.vcc >> l) & 1 ? ' on' : ''}">${(w.vcc >> l) & 1}</td>${w.v.slice(1).map((r) => `<td>${r[l]}</td>`).join('')}</tr>`;
+      }
+      h += '</tbody></table>';
+    }
+    const x0 = t.asm.tests[cur.tsel] || {}, init = Array.from({ length: MEMN }, (_, i) => (x0.mem && x0.mem[i]) || 0), wantM = (x0.want || {}).mem || {};
+    h += '<p class="wavehd">기억</p><div class="ram">' + m.mem.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}${k in wantM ? ' goal' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
+    if (t.asm.ops.some((o) => o.startsWith('DS_'))) h += '<p class="wavehd">LDS</p><div class="ram">' + m.lds.map((x, k) => `<div class="cell${x ? ' chg' : ''}"><small>${k}</small>${x}</div>`).join('') + '</div>';
+  } else if (vec) {
     h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>SCC <b>${m.scc}</b></span><span>${state}</span></div>`;
     h += '<table class="lanes"><thead><tr><th>레인</th><th>EXEC</th><th>VCC</th><th>v0</th><th>v1</th><th>v2</th><th>v3</th></tr></thead><tbody>';
     for (let l = 0; l < LANES; l++) {
@@ -489,7 +509,12 @@ function renderAsm() {
   t.asm.tests.forEach((x, k) => {
     const r = machRun(t, prog, k), ok = prog.length && machOk(t, x, r);
     let inTxt, wTxt, got;
-    if (vec) {
+    if (isCu(t)) {
+      const w = x.want || {};
+      inTxt = [memTxt(x.mem), memTxt(Object.fromEntries(Object.entries(t.asm.s || {}).map(([k, v]) => [`s${k}`, v]))).replace(/\[(s\d)\]/g, '$1')].filter(Boolean).join(' · ') || '–';
+      wTxt = memTxt(w.mem) + (x.maxCycles != null ? ` · ${x.maxCycles}사이클 안` : '');
+      got = r.err ? '안 멈춰요' : `${memTxt(Object.fromEntries(Object.keys(w.mem || {}).map((j) => [j, r.mem[j]])))} · ${r.t}사이클`;
+    } else if (vec) {
       const w = x.want || {};
       inTxt = vRegsTxt({ v: x.v, s: x.s, exec: x.exec });
       wTxt = vRegsTxt(w) + (x.maxSteps != null ? ` · ${x.maxSteps}걸음 이하` : '');
@@ -503,7 +528,8 @@ function renderAsm() {
   });
   h += '</tbody></table>';
   if (!vec && t.asm.ram) h += `<p class="ttnote">늘 들어 있는 칸: ${ramTxt(t.asm.ram)} · 나머지 빈 칸은 0</p>`;
-  if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
+  if (isCu(t)) h += `<p class="ttnote">처음엔 v0 = 작업 번호${(t.asm.waves || 1) > 1 ? '(웨이브 둘: 0~7)' : ''}, 적지 않은 칸·레지스터는 0 · 한 줄 = 한 사이클 · 굵은 테두리 칸이 답을 볼 칸</p>`;
+  else if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();
   app.innerHTML = h;
   hookHints();

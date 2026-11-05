@@ -150,12 +150,111 @@ export const VISA = {
   S_CBRANCH_SCC1: { args: ['k'], real: 's_cbranch_scc1', desc: 'SCC가 1이면 k번 줄로' },
   S_CBRANCH_EXECZ: { args: ['k'], real: 's_cbranch_execz', desc: 'EXEC가 0(켜진 레인 없음)이면 k번 줄로' },
   S_ENDPGM: { args: [], real: 's_endpgm', desc: '끝' },
+  // 6부 메모리
+  G_LOAD: { args: ['v', 'v'], real: 'global_load_dword', desc: 'vD ← 기억[vA] — 늦게 와요, S_WAITCNT로 기다려요' },
+  G_STORE: { args: ['v', 'v'], real: 'global_store_dword', desc: '기억[vA] ← vS' },
+  G_ATOMIC_ADD: { args: ['v', 'v'], real: 'global_atomic_add', desc: '기억[vA] += vS — 같은 칸이어도 하나도 안 잃어요' },
+  S_LOAD: { args: ['s', 'n'], real: 's_load_dword', desc: 'sD ← 기억[n] — 웨이브에 한 번, 늦게 와요' },
+  DS_WRITE: { args: ['v', 'v'], real: 'ds_write_b32', desc: 'LDS[vA] ← vS' },
+  DS_READ: { args: ['v', 'v'], real: 'ds_read_b32', desc: 'vD ← LDS[vA] — 조금 늦게 와요' },
+  DS_ADD: { args: ['v', 'v'], real: 'ds_add_u32', desc: 'LDS[vA] += vS — 같은 칸이어도 안 잃어요' },
+  S_WAITCNT: { args: [], real: 's_waitcnt vmcnt(0) lgkmcnt(0)', desc: '오는 중인 읽기가 다 올 때까지 기다려요' },
+  S_BARRIER: { args: [], real: 's_barrier', desc: '워크그룹의 웨이브가 모두 여기 올 때까지 기다려요' },
 };
 // 'V_ADD v1, s0, v1' → { op, a: [1, 4, 1] }
 export const parseVec = (t) => t.split(';').map((x) => x.trim()).filter(Boolean).map((x) => {
   const [op, ...rest] = x.split(/[\s,]+/).filter(Boolean);
   return { op, a: VISA[op].args.map((k, i) => { const r = rest[i]; if (k === 'n' || k === 'k') return +r; const j = +r.slice(1); return k === 'vs' && r[0] === 's' ? 4 + j : j; }) };
 });
+// ---------- 6부: 작은 CU — 웨이브 1~2개, 기억 32칸, LDS 16칸, 사이클 ----------
+export const MEMN = 32, LDSN = 16, LINE = 4, CACHE_LINES = 4;
+export const CU_NOTE = '이 게임은 메모리를 많이 단순화했어요. 실제 dword·b32·u32 명령은 32비트 데이터 하나를 다루지만, 게임에선 8비트 한 칸으로 줄였어요(덧셈은 원자 덧셈까지 하위 8비트만 남아요). 기억은 32칸이고 주소는 칸 번호예요 — 실제 32비트 배열의 i번째 원소는 보통 「기준 바이트 주소 + 4×i」인데, 게임은 기준 주소와 ×4를 생략해요. LDS(16칸)도 같아요. 게임에선 같은 메모리 명령에서 같은 네 칸 줄을 읽는 레인들의 요청을 하나로 묶어요. 실제 coalescing도 여러 레인의 요청을 필요한 메모리 트랜잭션으로 모으지만, 캐시 줄 하나가 언제나 전송 한 번과 같지는 않아요. 캐시는 최근 네 줄만 기억하고, 먼저 요청한 줄은 뒤 읽기가 다시 써요(줄이 아직 오는 중이면 도착을 기다려요). 사이클 수(읽기 지연 10, 줄마다 8, 캐시면 4, LDS 읽기 2, 스칼라 읽기 6)는 지어낸 수예요 — 실제 캐시 계층과 지연은 훨씬 복잡해요. 게임의 S_WAITCNT는 모든 읽기를 한꺼번에 기다려요. 실제 RDNA2에선 전역 읽기는 vmcnt, 스칼라 읽기와 LDS 읽기·쓰기·원자 연산은 lgkmcnt로 기다리고, 전역 쓰기와 반환값 없는 전역 원자 연산은 따로 s_waitcnt_vscnt null, 0으로 기다려요. 게임에선 쓰기(G_STORE·DS_WRITE)와 원자 연산이 바로 끝나요. 레인 여럿이 G_STORE로 같은 칸에 쓰면 어느 레인 값이 남을지 정해져 있지 않은데, 게임에선 뒤 레인이 남아요. 게임에선 한 번에 한 웨이브의 명령을 사이클마다 하나씩 실행하고, 기다리거나 끝나면 다른 웨이브로 넘어가요 — 실제 RDNA는 여러 웨이브의 명령 발행을 섞을 수 있어요. v0에도 게임이 작업 번호(웨이브 × 4 + 레인)를 미리 넣어 줘요. 둘 다 실제 스케줄·초기 레지스터 상태를 단순화한 규칙이에요.';
+const MEMOPS = new Set(['G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'DS_WRITE', 'DS_READ', 'DS_ADD', 'S_WAITCNT', 'S_BARRIER']);
+export function cuInit(asm, x) {
+  const W = asm.waves || 1;
+  const waves = Array.from({ length: W }, (_, w) => {
+    const m = vecInit({ ...asm, v: null }, { ...x, v: null });
+    m.v[0] = m.v[0].map((_, l) => w * LANES + l); // v0 = 작업 번호(단순화)
+    return Object.assign(m, { w, wait: null, pend: 0 });
+  });
+  const mem = Array.from({ length: MEMN }, (_, i) => (x.mem && x.mem[i]) || 0);
+  return { t: 0, waves, cur: 0, mem, lds: Array(LDSN).fill(0), cache: [], memFree: 0, pending: [], halted: false, steps: 0 };
+}
+function cuLoadLatency(m, addrs) {
+  // 캐시 = 최근 네 줄과 그 줄이 도착하는 사이클. 먼저 요청한 줄을 뒤 읽기가 다시 쓰되, 줄이 도착하기 전엔 못 끝나요
+  const lines = [...new Set(addrs.map((a) => Math.floor(a / LINE)))];
+  const missed = [];
+  let ready = m.t + 4;
+  for (const ln of lines) {
+    const i = m.cache.findIndex((c) => c.ln === ln);
+    if (i >= 0) { ready = Math.max(ready, m.cache[i].ready); m.cache.push(m.cache.splice(i, 1)[0]); } else missed.push(ln);
+  }
+  if (missed.length) {
+    const start = Math.max(m.t + 10, m.memFree);
+    missed.forEach((ln, k) => { m.cache.push({ ln, ready: start + 8 * (k + 1) }); }); // 기억 길은 한 줄씩 차례로
+    m.memFree = start + 8 * missed.length;
+    ready = Math.max(ready, m.memFree);
+  }
+  while (m.cache.length > CACHE_LINES) m.cache.shift();
+  return ready;
+}
+function cuExec(prog, m, w) {
+  const { op, a } = prog[w.pc];
+  if (!MEMOPS.has(op)) { vecStep(prog, w); return; }
+  const act = []; for (let l = 0; l < LANES; l++) if ((w.exec >> l) & 1) act.push(l);
+  const addr = (l) => w.v[a[op === 'G_LOAD' || op === 'DS_READ' ? 1 : 0]][l];
+  if (op === 'G_LOAD') {
+    const ad = act.map((l) => addr(l) % MEMN);
+    const vals = act.map((l, i) => m.mem[ad[i]]);
+    m.pending.push({ w: w.w, reg: a[0], lanes: act, vals, ready: act.length ? cuLoadLatency(m, ad) : m.t + 1 }); w.pend++;
+  } else if (op === 'G_STORE') for (const l of act) m.mem[addr(l) % MEMN] = w.v[a[1]][l]; // 같은 칸이면 뒤 레인이 남음(단순화)
+  else if (op === 'G_ATOMIC_ADD') for (const l of act) { const i = addr(l) % MEMN; m.mem[i] = (m.mem[i] + w.v[a[1]][l]) & 255; }
+  else if (op === 'S_LOAD') { m.pending.push({ w: w.w, sreg: a[0], val: m.mem[a[1] % MEMN], ready: m.t + 6 }); w.pend++; }
+  else if (op === 'DS_WRITE') for (const l of act) m.lds[addr(l) % LDSN] = w.v[a[1]][l];
+  else if (op === 'DS_ADD') for (const l of act) { const i = addr(l) % LDSN; m.lds[i] = (m.lds[i] + w.v[a[1]][l]) & 255; }
+  else if (op === 'DS_READ') { m.pending.push({ w: w.w, reg: a[0], lanes: act, vals: act.map((l) => m.lds[addr(l) % LDSN]), ready: m.t + 2 }); w.pend++; }
+  else if (op === 'S_WAITCNT') { if (w.pend) w.wait = 'cnt'; }
+  else if (op === 'S_BARRIER') w.wait = 'bar';
+  w.pc++; w.steps++;
+}
+// 한 사이클: 도착한 읽기를 넣고, 돌 수 있는 웨이브 하나가 한 줄
+export function cuStep(prog, m) {
+  if (m.halted) return m;
+  for (const p of m.pending.filter((p) => p.ready <= m.t)) {
+    const w = m.waves[p.w];
+    if (p.sreg != null) w.s[p.sreg] = p.val; else p.lanes.forEach((l, i) => { w.v[p.reg][l] = p.vals[i]; });
+    w.pend--;
+  }
+  m.pending = m.pending.filter((p) => p.ready > m.t);
+  for (const w of m.waves) if (w.wait === 'cnt' && !w.pend) w.wait = null;
+  const live = m.waves.filter((w) => !w.halted);
+  if (live.length && live.every((w) => w.wait === 'bar')) live.forEach((w) => { w.wait = null; });
+  if (!live.length && !m.pending.length) { m.halted = true; return m; }
+  const W = m.waves.length;
+  for (let k = 0; k < W; k++) {
+    const w = m.waves[(m.cur + k) % W];
+    if (w.halted || w.wait) continue;
+    m.cur = w.w; // 멈출 때까지 같은 웨이브
+    if (w.pc >= prog.length) w.halted = true; else cuExec(prog, m, w);
+    break;
+  }
+  m.t++; m.steps++;
+  return m;
+}
+export function cuRun(prog, asm, x, limit = 3000) {
+  const m = cuInit(asm, x);
+  while (!m.halted && m.t < limit) cuStep(prog, m);
+  if (!m.halted) m.err = 'loop';
+  return m;
+}
+export function cuOk(x, m) {
+  if (m.err) return false;
+  const w = x.want || {};
+  for (const [i, val] of Object.entries(w.mem || {})) if (m.mem[i] !== val) return false;
+  if (x.maxCycles != null && m.t > x.maxCycles) return false;
+  return true;
+}
+
 export function vecInit(asm, x) {
   const v = Array.from({ length: 4 }, (_, r) => Array.from({ length: LANES }, (_, l) => (r === 0 ? l : 0))); // v0 = 레인 번호
   for (const src of [asm.v, x.v]) if (src) for (const [r, arr] of Object.entries(src)) v[r] = arr.slice();
@@ -931,5 +1030,96 @@ export const STAGES = [
   {
     id: '5-18', book: 5, kind: '시험', title: '5부 시험', pool: ['5-10', '5-12', '5-13', '5-15'], rounds: 3,
     text: '5부의 벡터 프로그램 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 6부(메모리)로 가요.',
+  },
+  // ---------- 6부 메모리 ----------
+  {
+    id: '6-1', book: 6, kind: '개념', title: '같은 줄인가',
+    text: '게임에선 기억이 한 칸씩이 아니라 네 칸이 한 줄로 오가요(단순화). 여기서는 주소 0~15만 써요 — 네 자리 중 윗 두 자리가 줄 번호. 두 레인의 주소가 같은 줄이면 1 — 게임에선 같은 줄을 읽는 레인들의 요청을 하나로 묶어요(실제 coalescing도 요청을 모으지만, 캐시 줄 하나가 늘 전송 한 번과 같지는 않아요).',
+    hints: ['아래 두 자리는 안 봐도 돼요. 1-17 「두 자리가 같나」를 윗 두 자리로.', 'AND(XNOR(A3,B3), XNOR(A2,B2)).'],
+    sol: 'x=XNOR(A3,B3); z=XNOR(A2,B2); y=AND(x,z); @0=y',
+    ins: ['A3', 'A2', 'A1', 'A0', 'B3', 'B2', 'B1', 'B0'], outs: ['같은 줄'], par: 12,
+    fn: ([a3, a2, , , b3, b2]) => [b(a3 === b3 && a2 === b2)],
+  },
+  // 여기부터 작은 CU — 기억에서 읽고 쓰기. 걸음 대신 사이클을 세요
+  {
+    id: '6-2', book: 6, kind: '개념', title: '늦게 오는 읽기',
+    text: '레인마다 기억[레인]을 읽어 기억[레인 + 4]에 옮겨요. G_LOAD는 바로 오지 않아요 — 줄은 다음으로 넘어가고, 값은 몇 사이클 뒤에 레지스터에 들어와요. 그 사이 다른 일을 하다가, 쓰기 전에 S_WAITCNT로 기다려요. 게임에선 값이 오기 전에 읽으면 옛값을 써서, 기다리지 않으면 초기값 0을 저장해요 — 실제로는 필요한 waitcnt를 빼먹은 결과는 아예 믿으면 안 돼요.',
+    hints: ['읽기를 먼저 걸고, 기다리는 동안 「레인 + 4」 주소를 셈해요. s0엔 4가 들어 있어요.', 'G_LOAD v1, v0 · V_ADD v2, s0, v0 · S_WAITCNT · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 4 }, tests: [{ mem: { 0: 7, 1: 8, 2: 9, 3: 10 }, want: { mem: { 4: 7, 5: 8, 6: 9, 7: 10 } } }, { mem: { 0: 0, 1: 200, 2: 5, 3: 1 }, want: { mem: { 4: 0, 5: 200, 6: 5, 7: 1 } } }] },
+    sol: 'G_LOAD v1, v0; V_ADD v2, s0, v0; S_WAITCNT; G_STORE v2, v1; S_ENDPGM', par: 5,
+  },
+  {
+    id: '6-3', book: 6, kind: '연습', title: '두 배열 더하기',
+    text: 'c[레인] = a[레인] + b[레인]. a는 기억[0~3], b는 기억[4~7], c는 기억[8~11]. 시작 주소(b는 4, c는 8)는 s0·s1에 들어 있어요 — 커널 인자처럼.',
+    hints: ['읽기 둘을 먼저 다 걸고, 한 번만 기다려요.', 'V_ADD v2, s0, v0 · V_ADD v3, s1, v0 · G_LOAD v1, v0 · G_LOAD v2, v2 · S_WAITCNT · V_ADD v1, v1, v2 · G_STORE v3, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 4, 1: 8 }, tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4, 4: 10, 5: 20, 6: 30, 7: 40 }, want: { mem: { 8: 11, 9: 22, 10: 33, 11: 44 } } }, { mem: { 0: 9, 1: 0, 2: 100, 3: 7, 4: 1, 5: 0, 6: 200, 7: 7 }, want: { mem: { 8: 10, 9: 0, 10: 44, 11: 14 } } }] },
+    sol: 'V_ADD v2, s0, v0; V_ADD v3, s1, v0; G_LOAD v1, v0; G_LOAD v2, v2; S_WAITCNT; V_ADD v1, v1, v2; G_STORE v3, v1; S_ENDPGM', par: 8,
+  },
+  {
+    id: '6-4', book: 6, kind: '개념', title: '스칼라 읽기',
+    text: '레인마다 기억[레인] + 기억[15]를 기억[레인 + 4]에. 기억[15]는 모든 레인이 같은 값 — 레인마다 읽지 말고 S_LOAD로 웨이브에 한 번만 s 레지스터로 읽어요(스칼라 쪽 캐시로 가요). s0엔 4.',
+    hints: ['S_LOAD s1, 15로 한 번, G_LOAD로 레인마다, 그리고 한 번 기다리기.', 'S_LOAD s1, 15 · G_LOAD v1, v0 · V_ADD v2, s0, v0 · S_WAITCNT · V_ADD v1, v1, s1 · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 4 }, tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4, 15: 100 }, want: { mem: { 4: 101, 5: 102, 6: 103, 7: 104 } } }, { mem: { 0: 50, 1: 0, 2: 9, 3: 255, 15: 1 }, want: { mem: { 4: 51, 5: 1, 6: 10, 7: 0 } } }] },
+    sol: 'S_LOAD s1, 15; G_LOAD v1, v0; V_ADD v2, s0, v0; S_WAITCNT; V_ADD v1, v1, s1; G_STORE v2, v1; S_ENDPGM', par: 7,
+  },
+  {
+    id: '6-5', book: 6, kind: '개념', title: '흩어진 읽기',
+    text: '레인 l이 기억[4l]과 기억[4l + 1]을 더해 기억[16 + l]에. 그런데 레인 넷의 주소(0·4·8·12)가 서로 다른 줄이라 첫 읽기에 줄 넷을 가져와요. 두 번째 읽기(1·5·9·13)는 같은 줄이라 게임에선 먼저 요청한 줄을 다시 써요(실제로도 줄이 이미 왔으면 캐시에 적중하고, 아직 오는 중이면 요청을 묶거나 도착을 기다려요). 다 끝난 사이클 수를 봐 두세요 — 다음 스테이지와 견줘요. s0 = 16, s1 = 1.',
+    hints: ['주소 4l = l을 두 번 두 배로(V_ADD 둘).', 'V_ADD v2, v0, v0 · V_ADD v2, v2, v2 · G_LOAD v1, v2 · V_ADD v2, v2, s1 · G_LOAD v3, v2 · V_ADD v2, s0, v0 · S_WAITCNT · V_ADD v1, v1, v3 · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 16, 1: 1 }, tests: [{ mem: { 0: 1, 1: 2, 4: 3, 5: 4, 8: 5, 9: 6, 12: 7, 13: 8 }, want: { mem: { 16: 3, 17: 7, 18: 11, 19: 15 } } }, { mem: { 0: 10, 1: 0, 4: 0, 5: 9, 8: 100, 9: 100, 12: 1, 13: 1 }, want: { mem: { 16: 10, 17: 9, 18: 200, 19: 2 } } }] },
+    sol: 'V_ADD v2, v0, v0; V_ADD v2, v2, v2; G_LOAD v1, v2; V_ADD v2, v2, s1; G_LOAD v3, v2; V_ADD v2, s0, v0; S_WAITCNT; V_ADD v1, v1, v3; G_STORE v2, v1; S_ENDPGM', par: 10,
+  },
+  {
+    id: '6-6', book: 6, kind: '연습', title: '모아 읽기',
+    text: '같은 일인데 수를 놓는 모양을 바꿨어요: 레인 l의 두 수가 기억[l]과 기억[l + 4]에. 이제 한 번 읽을 때 레인 넷이 한 줄에 모여요(coalescing). 32사이클 안에 끝내 보세요 — 6-5보다 얼마나 빨라졌나요? s0 = 16, s1 = 4.',
+    hints: ['주소 셈이 필요 없어요 — v0이 곧 첫 주소, 두 번째는 v0 + s1.', 'G_LOAD v1, v0 · V_ADD v2, v0, s1 · G_LOAD v3, v2 · V_ADD v2, s0, v0 · S_WAITCNT · V_ADD v1, v1, v3 · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 16, 1: 4 }, tests: [{ mem: { 0: 1, 4: 2, 1: 3, 5: 4, 2: 5, 6: 6, 3: 7, 7: 8 }, want: { mem: { 16: 3, 17: 7, 18: 11, 19: 15 } }, maxCycles: 32 }, { mem: { 0: 10, 4: 0, 1: 0, 5: 9, 2: 100, 6: 100, 3: 1, 7: 1 }, want: { mem: { 16: 10, 17: 9, 18: 200, 19: 2 } }, maxCycles: 32 }] },
+    sol: 'G_LOAD v1, v0; V_ADD v2, v0, s1; G_LOAD v3, v2; V_ADD v2, s0, v0; S_WAITCNT; V_ADD v1, v1, v3; G_STORE v2, v1; S_ENDPGM', par: 8,
+  },
+  {
+    id: '6-7', book: 6, kind: '연습', title: '이웃 더하기',
+    text: '레인 l: 기억[l] + 기억[l + 1]을 기억[8 + l]에(기억[0~4]에 수 다섯). 두 번째 읽기(1~4)는 거의 첫 읽기와 같은 줄이라 다시 써요 — 레인 3의 기억[4]만 새 줄. s0 = 8, s1 = 1.',
+    hints: ['읽기 둘을 걸고 한 번 기다려요.', 'G_LOAD v1, v0 · V_ADD v2, v0, s1 · G_LOAD v3, v2 · V_ADD v2, v0, s0 · S_WAITCNT · V_ADD v1, v1, v3 · G_STORE v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 8, 1: 1 }, tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4, 4: 5 }, want: { mem: { 8: 3, 9: 5, 10: 7, 11: 9 } } }, { mem: { 0: 0, 1: 10, 2: 0, 3: 10, 4: 0 }, want: { mem: { 8: 10, 9: 10, 10: 10, 11: 10 } } }] },
+    sol: 'G_LOAD v1, v0; V_ADD v2, v0, s1; G_LOAD v3, v2; V_ADD v2, v0, s0; S_WAITCNT; V_ADD v1, v1, v3; G_STORE v2, v1; S_ENDPGM', par: 8,
+  },
+  {
+    id: '6-8', book: 6, kind: '개념', title: '원자 덧셈',
+    text: '기억[0~3]의 합을 기억[8]에. 레인 넷이 같은 칸에 G_STORE로 쓰면 하나만 남아요(어느 레인 값이 남을지는 정해져 있지 않아요). G_ATOMIC_ADD는 레인마다의 덧셈을 하나도 안 잃어요. 기억[8]은 처음에 0이에요.',
+    hints: ['주소 8을 모든 레인에 두고, 읽은 값을 원자 덧셈으로.', 'G_LOAD v1, v0 · V_MOVI v2, 8 · S_WAITCNT · G_ATOMIC_ADD v2, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4 }, want: { mem: { 8: 10 } } }, { mem: { 0: 100, 1: 0, 2: 50, 3: 5 }, want: { mem: { 8: 155 } } }] },
+    sol: 'G_LOAD v1, v0; V_MOVI v2, 8; S_WAITCNT; G_ATOMIC_ADD v2, v1; S_ENDPGM', par: 5,
+  },
+  {
+    id: '6-9', book: 6, kind: '연습', title: '세기',
+    text: '기억[0~3]엔 0~3 사이의 수가 있어요. 수마다 몇 번 나왔는지를 기억[8 + 그 수]에 세요(히스토그램). 같은 수가 여러 레인에 나오니 원자 덧셈이 필요해요. 원자 덧셈은 있던 값에 더하니까, 기억[8~11]은 게임이 처음에 0으로 준비해 둬요. s0 = 8.',
+    hints: ['주소 = 8 + 읽은 수, 더할 값 = 1.', 'G_LOAD v1, v0 · S_WAITCNT · V_ADD v2, v1, s0 · V_MOVI v3, 1 · G_ATOMIC_ADD v2, v3 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 8 }, tests: [{ mem: { 0: 2, 1: 0, 2: 2, 3: 3 }, want: { mem: { 8: 1, 9: 0, 10: 2, 11: 1 } } }, { mem: { 0: 1, 1: 1, 2: 1, 3: 1 }, want: { mem: { 8: 0, 9: 4, 10: 0, 11: 0 } } }] },
+    sol: 'G_LOAD v1, v0; S_WAITCNT; V_ADD v2, v1, s0; V_MOVI v3, 1; G_ATOMIC_ADD v2, v3; S_ENDPGM', par: 6,
+  },
+  {
+    id: '6-10', book: 6, kind: '개념', title: 'LDS',
+    text: 'LDS는 같은 워크그룹의 레인들이 같이 쓰는 작고 빠른 기억이에요. 여기서는 다른 레인의 값을 LDS에 쓰고 읽어서 주고받아요(같은 웨이브 안에선 레인끼리 값을 바꾸는 명령도 따로 있어요). 기억[0~3]을 거꾸로 기억[8~11]에: 레인 l이 LDS[l]에 쓰고 LDS[3 − l]을 읽어요. DS_READ도 조금 늦게 와요. s0 = 8.',
+    hints: ['읽어서 LDS에 쓰고, 3 − l 주소로 LDS를 읽고, 기다렸다가 기억에.', 'G_LOAD v1, v0 · S_WAITCNT · DS_WRITE v0, v1 · V_MOVI v2, 3 · V_SUB v2, v2, v0 · DS_READ v1, v2 · V_ADD v3, v0, s0 · S_WAITCNT · G_STORE v3, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'DS_WRITE', 'DS_READ', 'S_WAITCNT', 'S_ENDPGM'], s: { 0: 8 }, tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4 }, want: { mem: { 8: 4, 9: 3, 10: 2, 11: 1 } } }, { mem: { 0: 9, 1: 0, 2: 0, 3: 7 }, want: { mem: { 8: 7, 9: 0, 10: 0, 11: 9 } } }] },
+    sol: 'G_LOAD v1, v0; S_WAITCNT; DS_WRITE v0, v1; V_MOVI v2, 3; V_SUB v2, v2, v0; DS_READ v1, v2; V_ADD v3, v0, s0; S_WAITCNT; G_STORE v3, v1; S_ENDPGM', par: 10,
+  },
+  {
+    id: '6-11', book: 6, kind: '개념', title: '배리어',
+    text: '이번엔 워크그룹에 웨이브가 둘(작업 0~7). 기억[0~7]을 거꾸로 기억[8~15]에. 그런데 웨이브 0이 LDS[7 − id]를 읽을 때 웨이브 1은 아직 안 썼을 수 있어요. S_BARRIER는 워크그룹 웨이브들의 도착을 맞추는 명령이고, 앞선 LDS 쓰기가 끝나는 건 S_WAITCNT로 따로 기다려요(배리어가 전역 기억의 캐시까지 맞춰 주지는 않아요). s0 = 8.',
+    hints: ['6-10에서 「쓰기 → (기다리기·배리어) → 읽기」. 거꾸로 주소는 7 − id.', 'G_LOAD v1, v0 · S_WAITCNT · DS_WRITE v0, v1 · S_WAITCNT · S_BARRIER · V_MOVI v2, 7 · V_SUB v2, v2, v0 · DS_READ v1, v2 · V_ADD v3, v0, s0 · S_WAITCNT · G_STORE v3, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, waves: 2, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'DS_WRITE', 'DS_READ', 'DS_ADD', 'S_WAITCNT', 'S_BARRIER', 'V_CMP_EQ', 'S_SAVEEXEC', 'S_ENDPGM'], s: { 0: 8 }, tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8 }, want: { mem: { 8: 8, 9: 7, 10: 6, 11: 5, 12: 4, 13: 3, 14: 2, 15: 1 } } }, { mem: { 0: 10, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 20 }, want: { mem: { 8: 20, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, 15: 10 } } }] },
+    sol: 'G_LOAD v1, v0; S_WAITCNT; DS_WRITE v0, v1; S_WAITCNT; S_BARRIER; V_MOVI v2, 7; V_SUB v2, v2, v0; DS_READ v1, v2; V_ADD v3, v0, s0; S_WAITCNT; G_STORE v3, v1; S_ENDPGM', par: 12,
+  },
+  {
+    id: '6-12', book: 6, kind: '연습', title: '워크그룹 합',
+    text: '기억[0~7](웨이브 둘)의 합을 기억[8]에 — 전역 기억엔 한 번만 쓰고 싶어요. 레인마다 LDS[0]에 DS_ADD로 모으고, 배리어로 다 모이길 기다린 뒤, 작업 0번 레인만(EXEC로) 기억[8]에 써요. LDS[0]은 게임이 처음에 0으로 준비해 둬요 — 실제 LDS는 저절로 0이 되지 않아서, 작업 하나가 0을 쓰고 완료 대기와 배리어를 거친 뒤 더하기를 시작해야 해요.',
+    hints: ['모으기: DS_ADD(주소 0). 배리어. 그다음 LDS[0]을 읽고, V_CMP_EQ v0, (0)으로 작업 0만 남겨 쓰기.', 'G_LOAD v1, v0 · V_MOVI v2, 0 · S_WAITCNT · DS_ADD v2, v1 · S_WAITCNT · S_BARRIER · DS_READ v1, v2 · V_CMP_EQ v0, v2 · S_SAVEEXEC s1 · V_MOVI v3, 8 · S_WAITCNT · G_STORE v3, v1 · S_ENDPGM.'],
+    asm: { cu: true, vec: true, waves: 2, ops: ['V_MOV', 'V_MOVI', 'V_ADD', 'V_SUB', 'G_LOAD', 'G_STORE', 'G_ATOMIC_ADD', 'S_LOAD', 'DS_WRITE', 'DS_READ', 'DS_ADD', 'S_WAITCNT', 'S_BARRIER', 'V_CMP_EQ', 'S_SAVEEXEC', 'S_ENDPGM'], tests: [{ mem: { 0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8 }, want: { mem: { 8: 36 } } }, { mem: { 0: 100, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 55 }, want: { mem: { 8: 155 } } }] },
+    sol: 'G_LOAD v1, v0; V_MOVI v2, 0; S_WAITCNT; DS_ADD v2, v1; S_WAITCNT; S_BARRIER; DS_READ v1, v2; V_CMP_EQ v0, v2; S_SAVEEXEC s1; V_MOVI v3, 8; S_WAITCNT; G_STORE v3, v1; S_ENDPGM', par: 13,
+  },
+  {
+    id: '6-13', book: 6, kind: '시험', title: '6부 시험', pool: ['6-3', '6-8', '6-10', '6-11'], rounds: 3,
+    text: '6부의 메모리 프로그램 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 7부(CU·스케줄)로 가요.',
   },
 ];
