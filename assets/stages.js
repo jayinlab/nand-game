@@ -33,6 +33,22 @@ const clocked = (ci, update, read) => (st, ins) => {
   return read(st, ins);
 };
 // 클록 한 번 = 두 줄(clk 0, clk 1). 앞 글자들은 그 밖의 입력
+// 4-6 CPU 시간 줄: 프로그램을 미리 돌려 박자마다 그 줄의 명령어를 넣는다(ROM 자리를 표가 대신)
+const CPU_EXEC = (st, [o1, o0, i1, i0]) => {
+  const op = n2(o1, o0), i = n2(i1, i0), pc = st.p | 0, a = st.a | 0; // st.pc는 clocked가 쓰니 PC는 st.p
+  if (op === 0) st.a = i; else if (op === 1) st.a = (a + i) & 3;
+  st.p = op === 2 || (op === 3 && a === 0) ? i : (pc + 1) & 3;
+};
+const cpuSteps = (prog, cycles) => {
+  const st = {}, out = [];
+  for (let k = 0; k < cycles; k++) {
+    const [op, i] = prog[st.p | 0], x = [...bitsN(op, 2), ...bitsN(i, 2)].join('');
+    out.push(x + '0', x + '1');
+    CPU_EXEC(st, [...x].map(Number));
+  }
+  return out;
+};
+const cpuModel = () => clocked(4, CPU_EXEC, (st) => [...bitsN(st.p | 0, 2), ...bitsN(st.a | 0, 2)]);
 const tick = (...xs) => xs.flatMap((x) => [x + '0', x + '1']);
 const alu1 = (o1, o0, a, c, d) => [[a & c, a | c, a ^ c ^ d, a ^ c][o1 * 2 + o0], b(a + c + d >= 2)];
 
@@ -54,7 +70,66 @@ export const PARTS = {
   LATCH: { ins: ['d', 'st'], outs: ['q'], cost: 4, seq: (m, [d, s]) => { if (s) m.q = d; return [m.q | 0]; } },
   DFF: { ins: ['d', 'clk'], outs: ['q'], cost: 9, seq: (m, [d, c]) => { if (!c) m.m = d; else m.q = m.m | 0; return [m.q | 0]; } },
   BIT: { ins: ['d', 'st', 'clk'], outs: ['q'], cost: 13, seq: (m, [d, s, c]) => { if (!c) m.m = s ? d : m.q | 0; else m.q = m.m | 0; return [m.q | 0]; } },
+  // 4부 CPU 상자 — 명령어 두 자리(o1o0): 00 LDI · 01 ADD · 10 JMP · 11 JZ, 뒤 두 자리(i1i0)는 수
+  CTRL: { ins: ['o1', 'o0', 'z'], outs: ['wa', 'add', 'j'], cost: 7, fn: ([o1, o0, z]) => [b(!o1), b(!o1 && o0), b(o1 && (!o0 || z))] },
+  PC: {
+    ins: ['j', 't1', 't0', 'clk'], outs: ['p1', 'p0'], cost: 31,
+    seq: (m, [j, t1, t0, c]) => { const q = m.q || [0, 0]; if (!c) m.m = j ? [t1, t0] : bitsN((n2(...q) + 1) & 3, 2); else m.q = m.m || q; return m.q || [0, 0]; },
+  },
+  DATA: {
+    ins: ['add', 'wa', 'i1', 'i0', 'clk'], outs: ['a1', 'a0', 'z'], cost: 51,
+    seq: (m, [ad, wa, i1, i0, c]) => {
+      const q = m.q || [0, 0];
+      if (!c) m.m = wa ? bitsN(ad ? (n2(...q) + n2(i1, i0)) & 3 : n2(i1, i0), 2) : q; else m.q = m.m || q;
+      const r = m.q || [0, 0];
+      return [r[0], r[1], b(!r[0] && !r[1])];
+    },
+  },
 };
+
+// ---------- 4부 어셈블리: 작은 컴퓨터(8비트) ----------
+// 4-6의 회로 CPU를 8비트로 넓히고 기억(16칸)과 명령어를 몇 개 더한 것(단순화). 명령어 기억은 따로(줄 0~15).
+// 한 줄 = 8비트 기계어: 앞 네 자리 = 명령, 뒤 네 자리 = 수(0~15).
+export const ISA = {
+  HLT: { code: 0, arg: null, desc: '멈춰요' },
+  LDI: { code: 1, arg: 'n', desc: 'A ← 수 n' },
+  LD: { code: 2, arg: 'm', desc: 'A ← 기억[m]' },
+  ST: { code: 3, arg: 'm', desc: '기억[m] ← A' },
+  ADD: { code: 4, arg: 'm', desc: 'A ← A + 기억[m]' },
+  SUB: { code: 5, arg: 'm', desc: 'A ← A − 기억[m]' },
+  JMP: { code: 6, arg: 'k', desc: 'k번 줄로 가요' },
+  JZ: { code: 7, arg: 'k', desc: 'A가 0이면 k번 줄로' },
+  JN: { code: 8, arg: 'k', desc: 'A가 음수(맨 윗자리 1)면 k번 줄로' },
+  OUT: { code: 9, arg: null, desc: 'A를 내보내요' },
+};
+export const parseProg = (t) => t.split(';').map((x) => x.trim()).filter(Boolean).map((x) => { const [op, n] = x.split(/\s+/); return { op, n: n == null ? 0 : +n }; });
+// 한 줄씩 돌린다. m = { pc, a, ram, out, halted, steps, err }
+export function asmStep(prog, m) {
+  if (m.halted) return m;
+  if (m.pc >= prog.length) { m.halted = true; return m; } // 끝줄을 지나면 멈춤
+  const { op, n } = prog[m.pc];
+  let next = m.pc + 1;
+  if (op === 'HLT') { m.halted = true; return m; }
+  if (op === 'LDI') m.a = n;
+  else if (op === 'LD') m.a = m.ram[n];
+  else if (op === 'ST') m.ram[n] = m.a;
+  else if (op === 'ADD') m.a = (m.a + m.ram[n]) & 255;
+  else if (op === 'SUB') m.a = (m.a - m.ram[n]) & 255;
+  else if (op === 'JMP') next = n;
+  else if (op === 'JZ') { if (m.a === 0) next = n; }
+  else if (op === 'JN') { if (m.a & 128) next = n; }
+  else if (op === 'OUT') m.out.push(m.a);
+  m.pc = next;
+  m.steps++;
+  return m;
+}
+export const asmInit = (ram) => ({ pc: 0, a: 0, ram: Array.from({ length: 16 }, (_, i) => (ram && ram[i]) || 0), out: [], halted: false, steps: 0 });
+export function asmRun(prog, ram, limit = 2000) {
+  const m = asmInit(ram);
+  while (!m.halted && m.steps < limit) asmStep(prog, m);
+  if (!m.halted) m.err = 'loop';
+  return m;
+}
 
 const AB = ['A', 'B'];
 const ABC = ['A', 'B', 'C'];
@@ -480,5 +555,163 @@ export const STAGES = [
   {
     id: '3-16', book: 3, kind: '시험', title: '3부 시험', pool: ['3-3', '3-5', '3-7', '3-9', '3-11', '3-13'], rounds: 4,
     text: '3부에서 만든 기억 회로 중 하나를 매번 뽑아요. 네 번 연달아. 넘기면 4부(CPU)로 가요.',
+  },
+  // ---------- 4부 CPU ----------
+  {
+    id: '4-1', book: 4, kind: '개념', title: '명령어 가르기',
+    text: '이 CPU의 명령어는 네 자리예요. 앞 두 자리(op1op0)가 무엇을 할지 — 00 LDI(A에 수 넣기) · 01 ADD(A에 수 더하기) · 10 JMP(그 줄로 가기) · 11 JZ(A가 0이면 그 줄로). 넷 중 지금 명령어 하나에만 불을 켜요.',
+    hints: ['줄마다 「op1이 이렇고 op0이 이렇다」를 AND로.', 'NOT op1·NOT op0 둘을 만들고 AND 넷: LDI = AND(NOT op1, NOT op0), ADD = AND(NOT op1, op0), JMP = AND(op1, NOT op0), JZ = AND(op1,op0).'],
+    sol: 'a=NOT(op1); c=NOT(op0); w=AND(a,c); x=AND(a,op0); y=AND(op1,c); z=AND(op1,op0); @0=w; @1=x; @2=y; @3=z',
+    ins: ['op1', 'op0'], outs: ['LDI', 'ADD', 'JMP', 'JZ'], par: 10,
+    fn: ([o1, o0]) => [b(!o1 && !o0), b(!o1 && o0), b(o1 && !o0), b(o1 && o0)],
+  },
+  {
+    id: '4-2', book: 4, kind: '개념', title: '제어 신호', unlock: 'CTRL',
+    text: '명령어를 「회로가 할 일」로 바꿔요. wa = A에 쓸까(LDI·ADD), add = 더할까(ADD), j = 점프할까(JMP는 늘, JZ는 Z=1일 때). Z는 「A가 0인가」 깃발(2-13)이에요. 상자로 쓰면 CTRL.',
+    hints: ['wa는 op1만 보면 돼요. add는 「ADD 줄」 하나. j는 op1이 1이고 (JMP이거나 Z).', 'wa = NOT op1, add = AND(NOT op1, op0), j = AND(op1, NAND(op0, NOT Z)).'],
+    sol: 'n=NOT(op1); d=AND(n,op0); nz=NOT(Z); k=NAND(op0,nz); j=AND(op1,k); @0=n; @1=d; @2=j',
+    ins: ['op1', 'op0', 'Z'], outs: ['wa', 'add', 'j'], par: 7,
+    fn: ([o1, o0, z]) => [b(!o1), b(!o1 && o0), b(o1 && (!o0 || z))],
+  },
+  {
+    id: '4-3', book: 4, kind: '개념', title: '프로그램 카운터', unlock: 'PC',
+    text: 'PC는 「지금 몇 번 줄인가」. 박자마다 하나씩 늘고(3-9 카운터), J=1인 박자엔 T1T0 줄로 뛰어요. 상자로 쓰면 PC.',
+    hints: ['다음 값을 둘 중에서 골라요 — 하나 더한 값, 아니면 T. 고르는 건 J.', '자리마다 MUX(하나 더한 자리, T 자리, J) → DFF. 하나 더하기는 NOT P0 · XOR(P1, P0).'],
+    sol: 'n=NOT(a); x=XOR(c,a); m=MUX(n,T0,J); k=MUX(x,T1,J); a=DFF(m,clk); c=DFF(k,clk); @0=c; @1=a',
+    ins: ['J', 'T1', 'T0', 'clk'], outs: ['P1', 'P0'], par: 31,
+    steps: tick('000', '000', '111', '000', '010', '110', '000'),
+    model: clocked(3, (st, [j, t1, t0]) => { st.v = j ? n2(t1, t0) : ((st.v | 0) + 1) & 3; }, (st) => bitsN(st.v | 0, 2)),
+  },
+  {
+    id: '4-4', book: 4, kind: '연습', title: 'PC 리셋',
+    text: 'rst=1인 박자엔 0번 줄로 돌아가요(J보다 먼저). 전원 단추가 하는 일이에요.',
+    hints: ['4-3의 다음 값을 「AND NOT rst」로 한 번 더 걸러요(3-11처럼).', '자리마다 AND(MUX(…, J), NOT rst) → DFF.'],
+    sol: 'n=NOT(a); x=XOR(c,a); m=MUX(n,T0,J); k=MUX(x,T1,J); r=NOT(rst); y=AND(m,r); z=AND(k,r); a=DFF(y,clk); c=DFF(z,clk); @0=c; @1=a',
+    ins: ['rst', 'J', 'T1', 'T0', 'clk'], outs: ['P1', 'P0'], par: 36,
+    steps: tick('0000', '0000', '1000', '0000', '0111', '1111', '0000'),
+    model: clocked(4, (st, [r, j, t1, t0]) => { st.v = r ? 0 : j ? n2(t1, t0) : ((st.v | 0) + 1) & 3; }, (st) => bitsN(st.v | 0, 2)),
+  },
+  {
+    id: '4-5', book: 4, kind: '개념', title: '데이터 길', unlock: 'DATA',
+    text: 'A 레지스터와 덧셈기. wa=1인 박자에 A가 바뀌어요 — add=0이면 I(수) 그대로, add=1이면 A+I. Z는 「A가 0인가」. 3-15 누산기에 선택기 하나를 더한 거예요. 상자로 쓰면 DATA.',
+    hints: ['3-15처럼 A+I를 만들고, I 그대로와 둘 중 하나를 add로 골라 BIT(…, wa, clk)에.', '자리마다 MUX(I, A+I, add) → BIT. Z = NOR(A1, A0).'],
+    sol: 'h=HA(r,I0); x=XOR(t,I1); y=XOR(x,h.1); m=MUX(I0,h,add); k=MUX(I1,y,add); r=BIT(m,wa,clk); t=BIT(k,wa,clk); z=NOR(t,r); @0=t; @1=r; @2=z',
+    ins: ['add', 'wa', 'I1', 'I0', 'clk'], outs: ['A1', 'A0', 'Z'], par: 51,
+    steps: tick('0110', '1101', '1010', '1101', '0111', '0100'),
+    model: clocked(4, (st, [ad, wa, i1, i0]) => { if (wa) st.v = ad ? ((st.v | 0) + n2(i1, i0)) & 3 : n2(i1, i0); }, (st) => [...bitsN(st.v | 0, 2), b(!(st.v | 0))]),
+  },
+  {
+    id: '4-6', book: 4, kind: '개념', title: '작은 컴퓨터',
+    text: '상자 셋(CTRL·DATA·PC)을 이어 CPU를 완성해요. 명령어 네 자리는 표가 박자마다 넣어 줘요(PC가 가리키는 줄 — 원래는 ROM 자리). 프로그램: 0 ADD 1 · 1 JZ 3 · 2 JMP 0 · 3 LDI 1. 출력은 PC와 A.',
+    hints: ['CTRL은 명령어 앞 두 자리와 Z를 받아 wa·add·j를 내요. DATA는 add·wa와 수 I를, PC는 j와 수 I(점프할 줄)를 받아요.', 'CTRL(op1, op0, DATA의 z) · DATA(add, wa, I1, I0, clk) · PC(j, I1, I0, clk). 출력은 PC의 p1·p0, DATA의 a1·a0.'],
+    sol: 'c=CTRL(op1,op0,d.2); d=DATA(c.1,c,I1,I0,clk); p=PC(c.2,I1,I0,clk); @0=p; @1=p.1; @2=d; @3=d.1',
+    ins: ['op1', 'op0', 'I1', 'I0', 'clk'], outs: ['P1', 'P0', 'A1', 'A0'], par: 89,
+    steps: cpuSteps([[1, 1], [3, 3], [2, 0], [0, 1]], 14),
+    model: cpuModel(),
+  },
+  {
+    id: '4-7', book: 4, kind: '연습', title: '다른 프로그램',
+    text: '같은 CPU에 다른 프로그램: 0 LDI 3 · 1 ADD 3 · 2 JZ 0 · 3 JMP 1. 회로는 그대로 — 프로그램만 바꾸면 하는 일이 바뀌어요. 이게 「컴퓨터」예요.',
+    hints: ['4-6과 같은 판이에요.', 'CTRL · DATA · PC 셋, 4-6과 같은 선.'],
+    sol: 'c=CTRL(op1,op0,d.2); d=DATA(c.1,c,I1,I0,clk); p=PC(c.2,I1,I0,clk); @0=p; @1=p.1; @2=d; @3=d.1',
+    ins: ['op1', 'op0', 'I1', 'I0', 'clk'], outs: ['P1', 'P0', 'A1', 'A0'], par: 89,
+    steps: cpuSteps([[0, 3], [1, 3], [3, 0], [2, 1]], 12),
+    model: cpuModel(),
+  },
+  // 여기부터 어셈블리 — 줄을 탭으로 쌓는다. 별 두 개 = 줄 수(par) 이하
+  {
+    id: '4-8', book: 4, kind: '개념', title: '첫 프로그램',
+    text: '이제 회로 대신 프로그램을 짜요. 4-6 CPU를 8비트로 넓히고 기억(16칸)과 명령어를 더한 작은 컴퓨터예요(단순화). 줄마다 오른쪽 숫자가 기계어 — 앞 자리가 명령, 뒤 자리가 수. 5를 내보내 봐요.',
+    hints: ['A에 5를 넣고 내보내고 멈춰요.', 'LDI 5 · OUT · HLT.'],
+    asm: { ops: ['LDI', 'OUT', 'HLT'], tests: [{ out: [5] }] },
+    sol: 'LDI 5; OUT; HLT', par: 3,
+  },
+  {
+    id: '4-9', book: 4, kind: '개념', title: '기억에서 읽기',
+    text: '기억[0]과 기억[1]에 수가 들어 있어요. 둘을 더해 내보내요. 8비트라 255를 넘으면 0부터 다시 돌아요.',
+    hints: ['A로 하나를 읽고(LD), 다른 하나를 더해요(ADD).', 'LD 0 · ADD 1 · OUT · HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ADD', 'OUT', 'HLT'], tests: [{ ram: { 0: 3, 1: 4 }, out: [7] }, { ram: { 0: 10, 1: 20 }, out: [30] }, { ram: { 0: 200, 1: 100 }, out: [44] }] },
+    sol: 'LD 0; ADD 1; OUT; HLT', par: 4,
+  },
+  {
+    id: '4-10', book: 4, kind: '연습', title: '세 수 더하기',
+    text: '기억[0]·[1]·[2]를 모두 더해 내보내요.',
+    hints: ['ADD를 한 번 더.', 'LD 0 · ADD 1 · ADD 2 · OUT · HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ADD', 'OUT', 'HLT'], tests: [{ ram: { 0: 1, 1: 2, 2: 3 }, out: [6] }, { ram: { 0: 50, 1: 0, 2: 9 }, out: [59] }] },
+    sol: 'LD 0; ADD 1; ADD 2; OUT; HLT', par: 5,
+  },
+  {
+    id: '4-11', book: 4, kind: '개념', title: '기억에 쓰기',
+    text: '기억[0] + 기억[1]을 내보내지 말고 기억[3]에 써 두세요. 계산 결과를 다음에 쓰려고 담아 두는 거예요.',
+    hints: ['OUT 대신 ST.', 'LD 0 · ADD 1 · ST 3 · HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'OUT', 'HLT'], tests: [{ ram: { 0: 3, 1: 4 }, mem: { 3: 7 } }, { ram: { 0: 9, 1: 9 }, mem: { 3: 18 } }] },
+    sol: 'LD 0; ADD 1; ST 3; HLT', par: 4,
+  },
+  {
+    id: '4-12', book: 4, kind: '개념', title: '빼기',
+    text: '기억[0] − 기억[1]을 내보내요. 작은 수에서 큰 수를 빼면 2-10의 2의 보수로 돌아요(4 − 9 = 251, 8비트의 −5).',
+    hints: ['ADD 자리에 SUB.', 'LD 0 · SUB 1 · OUT · HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'OUT', 'HLT'], tests: [{ ram: { 0: 9, 1: 4 }, out: [5] }, { ram: { 0: 4, 1: 9 }, out: [251] }] },
+    sol: 'LD 0; SUB 1; OUT; HLT', par: 4,
+  },
+  {
+    id: '4-13', book: 4, kind: '연습', title: '두 배',
+    text: '기억[0]의 두 배를 내보내요. 곱하기 명령은 없어요.',
+    hints: ['자기 자신을 더하면.', 'LD 0 · ADD 0 · OUT · HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'OUT', 'HLT'], tests: [{ ram: { 0: 6 }, out: [12] }, { ram: { 0: 100 }, out: [200] }] },
+    sol: 'LD 0; ADD 0; OUT; HLT', par: 4,
+  },
+  {
+    id: '4-14', book: 4, kind: '개념', title: '되풀이',
+    text: '기억[0]의 n부터 1까지 하나씩 내보내요(n=3이면 3, 2, 1). 기억[15]엔 늘 1이 들어 있어요. JMP로 위로 돌아가고, JZ로 빠져나와요.',
+    hints: ['「0이면 끝, 아니면 내보내고 1 빼고 다시」. 뺀 값은 기억[0]에 다시 써 둬요.', '0 LD 0 · 1 JZ 6 · 2 OUT · 3 SUB 15 · 4 ST 0 · 5 JMP 1 · 6 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'OUT', 'HLT'], ram: { 15: 1 }, tests: [{ ram: { 0: 3 }, out: [3, 2, 1] }, { ram: { 0: 1 }, out: [1] }, { ram: { 0: 0 }, out: [] }, { ram: { 0: 5 }, out: [5, 4, 3, 2, 1] }] },
+    sol: 'LD 0; JZ 6; OUT; SUB 15; ST 0; JMP 1; HLT', par: 7,
+  },
+  {
+    id: '4-15', book: 4, kind: '연습', title: '1부터 n까지 합',
+    text: '1 + 2 + … + n을 내보내요(n은 기억[0], 기억[15]=1). 합은 빈 칸(예: 기억[1])에 쌓아요 — 빈 칸은 처음에 0이에요.',
+    hints: ['4-14 되풀이 안에서 「합 = 합 + n」을 한 번씩.', '0 LD 0 · 1 JZ 8 · 2 ADD 1 · 3 ST 1 · 4 LD 0 · 5 SUB 15 · 6 ST 0 · 7 JMP 1 · 8 LD 1 · 9 OUT · 10 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'OUT', 'HLT'], ram: { 15: 1 }, tests: [{ ram: { 0: 4 }, out: [10] }, { ram: { 0: 1 }, out: [1] }, { ram: { 0: 0 }, out: [0] }, { ram: { 0: 10 }, out: [55] }] },
+    sol: 'LD 0; JZ 8; ADD 1; ST 1; LD 0; SUB 15; ST 0; JMP 1; LD 1; OUT; HLT', par: 11,
+  },
+  {
+    id: '4-16', book: 4, kind: '개념', title: '곱하기',
+    text: '기억[0] × 기억[1]을 내보내요. 곱하기는 「여러 번 더하기」 — 기억[1]을 세는 칸으로 써요(기억[15]=1).',
+    hints: ['기억[1]이 0이 될 때까지: 합(기억[2])에 기억[0]을 더하고, 기억[1]에서 1을 빼요.', '0 LD 1 · 1 JZ 8 · 2 SUB 15 · 3 ST 1 · 4 LD 2 · 5 ADD 0 · 6 ST 2 · 7 JMP 0 · 8 LD 2 · 9 OUT · 10 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'OUT', 'HLT'], ram: { 15: 1 }, tests: [{ ram: { 0: 3, 1: 4 }, out: [12] }, { ram: { 0: 5, 1: 0 }, out: [0] }, { ram: { 0: 0, 1: 7 }, out: [0] }, { ram: { 0: 7, 1: 9 }, out: [63] }] },
+    sol: 'LD 1; JZ 8; SUB 15; ST 1; LD 2; ADD 0; ST 2; JMP 0; LD 2; OUT; HLT', par: 11,
+  },
+  {
+    id: '4-17', book: 4, kind: '연습', title: '같은가',
+    text: '기억[0]과 기억[1]이 같으면 1, 다르면 0을 내보내요.',
+    hints: ['빼서 0이면 같아요.', '0 LD 0 · 1 SUB 1 · 2 JZ 5 · 3 LDI 0 · 4 JMP 6 · 5 LDI 1 · 6 OUT · 7 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'OUT', 'HLT'], tests: [{ ram: { 0: 3, 1: 3 }, out: [1] }, { ram: { 0: 3, 1: 4 }, out: [0] }, { ram: { 0: 0, 1: 0 }, out: [1] }, { ram: { 0: 200, 1: 100 }, out: [0] }] },
+    sol: 'LD 0; SUB 1; JZ 5; LDI 0; JMP 6; LDI 1; OUT; HLT', par: 8,
+  },
+  {
+    id: '4-18', book: 4, kind: '개념', title: '음수면 점프',
+    text: 'JN은 A의 맨 윗자리가 1(2의 보수로 음수)이면 뛰어요. 기억[0]과 기억[1] 중 큰 쪽을 내보내요(둘 다 128보다 작아요).',
+    hints: ['기억[0] − 기억[1]이 음수면 기억[1]이 커요.', '0 LD 0 · 1 SUB 1 · 2 JN 5 · 3 LD 0 · 4 JMP 6 · 5 LD 1 · 6 OUT · 7 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'JN', 'OUT', 'HLT'], tests: [{ ram: { 0: 3, 1: 7 }, out: [7] }, { ram: { 0: 9, 1: 2 }, out: [9] }, { ram: { 0: 5, 1: 5 }, out: [5] }, { ram: { 0: 100, 1: 27 }, out: [100] }] },
+    sol: 'LD 0; SUB 1; JN 5; LD 0; JMP 6; LD 1; OUT; HLT', par: 8,
+  },
+  {
+    id: '4-19', book: 4, kind: '연습', title: '나누기',
+    text: '기억[0] ÷ 기억[1]의 몫을 내보내요(기억[1]은 0이 아니고, 둘 다 128보다 작아요, 기억[15]=1). 나누기는 「몇 번 뺄 수 있나」.',
+    hints: ['빼서 음수가 되기 전까지 빼고, 뺄 때마다 몫(기억[2])에 1을 더해요.', '0 LD 0 · 1 SUB 1 · 2 JN 8 · 3 ST 0 · 4 LD 2 · 5 ADD 15 · 6 ST 2 · 7 JMP 0 · 8 LD 2 · 9 OUT · 10 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'JN', 'OUT', 'HLT'], ram: { 15: 1 }, tests: [{ ram: { 0: 7, 1: 2 }, out: [3] }, { ram: { 0: 6, 1: 3 }, out: [2] }, { ram: { 0: 1, 1: 5 }, out: [0] }, { ram: { 0: 100, 1: 7 }, out: [14] }] },
+    sol: 'LD 0; SUB 1; JN 8; ST 0; LD 2; ADD 15; ST 2; JMP 0; LD 2; OUT; HLT', par: 11,
+  },
+  {
+    id: '4-20', book: 4, kind: '연습', title: '피보나치',
+    text: '1, 1, 2, 3, 5, 8… 을 n개(기억[0]) 내보내요. 기억[1]=0과 기억[2]=1에서 시작하고, 기억[15]=1. 칸 하나를 잠깐 담아 두는 데 써요.',
+    hints: ['되풀이마다: 기억[2]를 내보내고, 다음 수 = 기억[1] + 기억[2]를 기억[3]에 담은 뒤 한 칸씩 밀어요.', '0 LD 0 · 1 JZ 13 · 2 SUB 15 · 3 ST 0 · 4 LD 2 · 5 OUT · 6 ADD 1 · 7 ST 3 · 8 LD 2 · 9 ST 1 · 10 LD 3 · 11 ST 2 · 12 JMP 0 · 13 HLT.'],
+    asm: { ops: ['LDI', 'LD', 'ST', 'ADD', 'SUB', 'JMP', 'JZ', 'JN', 'OUT', 'HLT'], ram: { 2: 1, 15: 1 }, tests: [{ ram: { 0: 5 }, out: [1, 1, 2, 3, 5] }, { ram: { 0: 1 }, out: [1] }, { ram: { 0: 8 }, out: [1, 1, 2, 3, 5, 8, 13, 21] }] },
+    sol: 'LD 0; JZ 13; SUB 15; ST 0; LD 2; OUT; ADD 1; ST 3; LD 2; ST 1; LD 3; ST 2; JMP 0; HLT', par: 14,
+  },
+  {
+    id: '4-21', book: 4, kind: '시험', title: '4부 시험', pool: ['4-12', '4-14', '4-16', '4-17', '4-18'], rounds: 3,
+    text: '4부의 프로그램 중 하나를 매번 뽑아요. 세 번 연달아. 넘기면 5부(병렬 — GPU 쪽)로 가요.',
   },
 ];

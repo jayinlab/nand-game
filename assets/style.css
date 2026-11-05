@@ -122,3 +122,34 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .board-svg [data-k="src"], .board-svg [data-k="sink"], .board-svg [data-k="part"] { touch-action: none; }
 .board-svg .dragline { stroke: var(--accent); stroke-dasharray: 6 4; pointer-events: none; }
 .board-svg .dragmark { fill: none; stroke: var(--accent); stroke-width: 2.5; pointer-events: none; }
+
+/* 4부 어셈블리 */
+.asm { margin-top: 10px; }
+.prog { list-style: none; margin: 0; padding: 0; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.prog li { display: grid; grid-template-columns: 28px 52px 1fr 34px; align-items: center; gap: 6px; padding: 0 10px; min-height: 40px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.prog li:last-child { border-bottom: 0; }
+.prog .ln { color: var(--mute); font-size: 13px; }
+.prog .op { font-weight: 700; }
+.prog .code { color: var(--mute); font-size: 12px; text-align: right; }
+.prog li.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.prog li.pc { box-shadow: inset 4px 0 0 var(--accent); }
+.asm .empty { color: var(--mute); font-size: 14px; }
+.lineedit { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.lineedit b { min-width: 28px; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
+.isa dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 6px 0; font-size: 14px; color: var(--ink); }
+.isa dt { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+.isa dd { margin: 0; }
+.isa small { color: var(--mute); }
+.mach { margin: 12px -16px; padding: 12px 16px; background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.chip { min-height: 34px; padding: 4px 12px; border-radius: 18px; }
+.chip.on { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.regs { display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline; font-variant-numeric: tabular-nums; }
+.regs small { color: var(--mute); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ram { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin: 10px 0; }
+.ram .cell { border: 1px solid var(--line); border-radius: 6px; text-align: center; padding: 2px 0; font-variant-numeric: tabular-nums; font-size: 14px; background: var(--bg); }
+.ram .cell small { display: block; font-size: 10px; color: var(--mute); }
+.ram .cell.given { border-color: var(--off); }
+.ram .cell.chg { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.outs { margin: 4px 0 8px; }
+.asmt td { font-size: 13px; }

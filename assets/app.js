@@ -1,4 +1,4 @@
-import { BOOKS, PARTS, STAGES } from './stages.js';
+import { BOOKS, PARTS, STAGES, ISA, parseProg, asmStep, asmInit, asmRun } from './stages.js';
 
 const app = document.getElementById('app');
 const SAVE = 'nand-game:v1';
@@ -118,6 +118,7 @@ function specOf() {
     };
   }
   const t = cur.sub || s;
+  if (t.asm) return { asm: true, ins: [], outs: [] };
   if (t.steps) {
     const steps = t.steps.map((x) => [...x].map(Number)), st = {};
     return { ins: t.ins, outs: t.outs, seq: true, steps, want: steps.map((x) => t.model(st, x).map((v) => (v == null ? null : v ? 1 : 0))) };
@@ -133,6 +134,18 @@ function pickPool(s, prev) {
   return STAGES[idxOf(ids[Math.floor(Math.random() * ids.length)])];
 }
 
+// 스테이지(또는 이번에 뽑힌 문제)에 맞춰 입력·프로그램·기계를 준비한다
+function setupTask() {
+  const t = cur.sub || cur.s;
+  if (t.asm) {
+    const v = rec(cur.s.id);
+    cur.prog = !temp(cur.s) && v.prog ? JSON.parse(JSON.stringify(v.prog)) : [];
+    cur.asel = null; cur.tsel = 0;
+    cur.m = asmInit(ramOf(t, 0));
+  }
+  cur.inVals = specOf().ins.map(() => 0);
+}
+
 function openStage(i) {
   const s = STAGES[i];
   const v = rec(s.id);
@@ -143,7 +156,7 @@ function openStage(i) {
     sub: s.pool ? pickPool(s) : null,
     live: {}, stepAt: null,
   };
-  cur.inVals = specOf().ins.map(() => 0);
+  setupTask();
   renderStage();
   window.scrollTo(0, 0);
 }
@@ -324,6 +337,7 @@ function truthTable(spec) {
 }
 
 function renderStage() {
+  if ((cur.sub || cur.s).asm) return renderAsm();
   const { s, i } = cur;
   const spec = specOf();
   if (spec.seq && cur.stepAt != null) { cur.live = {}; runSteps(cur.circ, spec, cur.stepAt - 1, cur.live); }
@@ -332,8 +346,6 @@ function renderStage() {
   const v = rec(s.id);
   const avail = partsFor(i);
   const sel = cur.sel;
-  const next = STAGES[i + 1];
-  const roundTxt = s.rounds ? `<span class="round">${cur.round + (cur.pass ? 0 : 1)} / ${s.rounds}</span>` : '';
 
   let tools = `<button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button>`;
   if (sel && sel.t === 'part') tools += `<button data-a="del" class="warn">부품 지우기</button>`;
@@ -341,35 +353,153 @@ function renderStage() {
   tools += `<button data-a="reset" ${cur.circ.parts.length ? '' : 'disabled'}>처음부터</button>`;
   if (spec.seq) tools += `<button data-a="power">전원 다시</button>`;
 
-  let after = '';
-  if (cur.pass && s.rounds && cur.round < s.rounds) after = `<button data-a="round" class="primary">${s.pool ? '다음 문제' : '다음 표'} →</button>`;
-  else if (cur.pass && next) after = `<a class="btn primary" href="#s/${next.id}">다음: ${next.id} ${next.title} →</a>`;
-  else if (cur.pass) after = `<a class="btn primary" href="#">목록으로</a>`;
-
   app.innerHTML = `
-  <header class="bar"><a href="#" class="back">← 목록</a><span class="sid">${s.id}</span><span class="stars">${starStr(s)}</span>${v.count ? `<span class="count">${v.count}번 풂</span>` : ''}</header>
-  <section class="task">
-    <h1>${s.title} <span class="kind k-${s.kind}">${s.kind}</span>${roundTxt}</h1>
-    <p>${s.text}</p>
-    ${s.only ? `<p class="rule">쓸 수 있는 부품: ${s.only.join(', ')}만</p>` : ''}
-    ${cur.sub ? `<p class="subq">이번 문제 · <b>${cur.sub.id} ${cur.sub.title}</b> — ${cur.sub.text}</p>` : ''}
-    ${hintBox(cur.sub || s)}
-  </section>
+  ${headHtml()}
   <div class="board">${boardSvg(spec, ev)}</div>
   <p class="status">${ev.osc ? '<b>값이 멈추지 않아요</b> — 고리가 계속 뒤집혀요(예: NOT이 자기 자신으로). ' : ''}${ev.cycle ? '<b>고리가 있어요</b> — 신호가 제자리로 돌아와서 값이 안 정해져요. 3부(기억)에서 이 고리를 일부러 써요. ' : ''}${statusText()}</p>
   <div class="tools">${tools}</div>
   <div class="palette">${avail.map((t) => `<button data-add="${t}">${t}<small>${PARTS[t].cost}</small></button>`).join('')}</div>
   <p class="cost">NAND ${cost}개 몫${s.par ? ` · 별 두 개는 ${s.par}개 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''}</p>
   ${spec.seq ? timeline(spec) : truthTable(spec)}
-  <div class="check">
+  ${checkHtml()}`;
+  hookHints();
+}
+
+function headHtml() {
+  const s = cur.s, v = rec(s.id);
+  const roundTxt = s.rounds ? `<span class="round">${cur.round + (cur.pass ? 0 : 1)} / ${s.rounds}</span>` : '';
+  return `<header class="bar"><a href="#" class="back">← 목록</a><span class="sid">${s.id}</span><span class="stars">${starStr(s)}</span>${v.count ? `<span class="count">${v.count}번 풂</span>` : ''}</header>
+  <section class="task">
+    <h1>${s.title} <span class="kind k-${s.kind}">${s.kind}</span>${roundTxt}</h1>
+    <p>${s.text}</p>
+    ${s.only ? `<p class="rule">쓸 수 있는 부품: ${s.only.join(', ')}만</p>` : ''}
+    ${cur.sub ? `<p class="subq">이번 문제 · <b>${cur.sub.id} ${cur.sub.title}</b> — ${cur.sub.text}</p>` : ''}
+    ${hintBox(cur.sub || s)}
+  </section>`;
+}
+
+function checkHtml() {
+  const s = cur.s, next = STAGES[cur.i + 1];
+  let after = '';
+  if (cur.pass && s.rounds && cur.round < s.rounds) after = `<button data-a="round" class="primary">${s.pool ? '다음 문제' : '다음 표'} →</button>`;
+  else if (cur.pass && next) after = `<a class="btn primary" href="#s/${next.id}">다음: ${next.id} ${next.title} →</a>`;
+  else if (cur.pass) after = `<a class="btn primary" href="#">목록으로</a>`;
+  return `<div class="check">
     ${cur.pass ? '' : `<button data-a="check" class="primary">확인</button>`}
     ${cur.msg ? `<p class="msg ${cur.pass ? 'good' : 'badmsg'}">${cur.msg}</p>` : ''}
     ${after}
     ${cur.pass && cur.share ? `<button data-a="share">기록 남기기</button>` : ''}
   </div>`;
+}
 
-  const d = app.querySelector('details');
+function hookHints() {
+  const d = app.querySelector('details.hints');
   if (d) d.addEventListener('toggle', () => { cur.hintOpen = d.open; });
+}
+
+// ---------- 4부 어셈블리 ----------
+const ramOf = (t, k) => ({ ...(t.asm.ram || {}), ...((t.asm.tests[k] || {}).ram || {}) });
+const argTxt = (l) => { const a = ISA[l.op].arg; return a === 'n' ? `${l.n}` : a === 'm' ? `[${l.n}]` : a === 'k' ? `→ ${l.n}` : ''; };
+const codeOf = (l) => ((ISA[l.op].code << 4) | (ISA[l.op].arg ? l.n : 0)).toString(16).toUpperCase().padStart(2, '0');
+const ramTxt = (r) => Object.entries(r).map(([k, v]) => `[${k}]=${v}`).join(' ') || '없음';
+const wantTxt = (x) => [x.out ? (x.out.length ? x.out.join(', ') : '(없음)') : '', x.mem ? ramTxt(x.mem) : ''].filter(Boolean).join(' · ');
+function testOk(x, m) {
+  if (m.err) return false;
+  if (x.out && JSON.stringify(m.out) !== JSON.stringify(x.out)) return false;
+  if (x.mem && !Object.entries(x.mem).every(([k, v]) => m.ram[k] === v)) return false;
+  return true;
+}
+
+function changeProg(fn) {
+  cur.undo.push(JSON.stringify(cur.prog));
+  if (cur.undo.length > 60) cur.undo.shift();
+  fn();
+  cur.msg = ''; cur.pass = false;
+  cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+  if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; persist(); }
+}
+
+function renderAsm() {
+  const s = cur.s, t = cur.sub || s, v = rec(s.id), prog = cur.prog, m = cur.m, a = cur.asel;
+  const init = asmInit(ramOf(t, cur.tsel)).ram;
+  let h = headHtml();
+  h += '<div class="asm"><ol class="prog">';
+  prog.forEach((l, k) => {
+    h += `<li data-a="asel" data-line="${k}" class="${k === a ? 'sel' : ''}${k === m.pc && !m.halted && m.steps ? ' pc' : ''}"><span class="ln">${k}</span><span class="op">${l.op}</span><span class="arg">${argTxt(l)}</span><span class="code">${codeOf(l)}</span></li>`;
+  });
+  h += '</ol>';
+  if (!prog.length) h += '<p class="empty">아래 명령 단추로 줄을 쌓아요. 줄을 누르면 수를 바꾸거나 옮길 수 있어요.</p>';
+  if (a != null && prog[a]) {
+    const l = prog[a], arg = ISA[l.op].arg;
+    h += `<div class="lineedit"><span>${a}번 줄</span>`;
+    if (arg) h += `<button data-a="adec">−</button><b>${l.n}</b><button data-a="ainc">+</button>`;
+    h += `<button data-a="aup" ${a ? '' : 'disabled'}>↑</button><button data-a="adown" ${a < prog.length - 1 ? '' : 'disabled'}>↓</button><button data-a="adel" class="warn">지우기</button></div>`;
+  }
+  h += `<div class="tools"><button data-a="undo" ${cur.undo.length ? '' : 'disabled'}>되돌리기</button><button data-a="reset" ${prog.length ? '' : 'disabled'}>처음부터</button></div>`;
+  h += `<div class="palette">${t.asm.ops.map((o) => `<button data-a="aop" data-op="${o}" ${prog.length >= 16 ? 'disabled' : ''}>${o}</button>`).join('')}</div>`;
+  h += `<details class="isa"><summary>명령어 설명</summary><dl>${t.asm.ops.map((o) => `<dt>${o}${ISA[o].arg ? ' ' + ISA[o].arg : ''}</dt><dd>${ISA[o].desc} <small>기계어 ${ISA[o].code.toString(16).toUpperCase()}_</small></dd>`).join('')}</dl></details>`;
+  h += `<p class="cost">${prog.length}줄${s.par ? ` · 별 두 개는 ${s.par}줄 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''} · 최대 16줄</p></div>`;
+
+  // 기계
+  h += '<div class="mach">';
+  if (t.asm.tests.length > 1) h += `<div class="chips">${t.asm.tests.map((_, k) => `<button data-a="atest" data-t="${k}" class="chip${k === cur.tsel ? ' on' : ''}">입력 ${k + 1}</button>`).join('')}</div>`;
+  h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>A <b>${m.a}</b> <small>${m.a.toString(2).padStart(8, '0')}</small></span><span>${m.halted ? '멈춤' : m.steps >= 2000 ? '안 멈춰요' : m.steps ? `${m.steps}걸음` : '처음'}</span></div>`;
+  h += '<div class="ram">' + m.ram.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
+  h += `<p class="outs">내보낸 것: <b>${m.out.length ? m.out.join(', ') : '–'}</b></p>`;
+  h += `<div class="tools"><button data-a="astep" ${m.halted || !prog.length ? 'disabled' : ''}>한 줄</button><button data-a="arun" ${m.halted || !prog.length ? 'disabled' : ''}>끝까지</button><button data-a="areset">처음으로</button></div>`;
+  h += '</div>';
+
+  // 시험 표
+  h += '<table class="tt asmt"><thead><tr><th>#</th><th>입력</th><th class="want gap">원함</th><th class="gap">지금</th></tr></thead><tbody>';
+  t.asm.tests.forEach((x, k) => {
+    const r = asmRun(prog, ramOf(t, k)), ok = prog.length && testOk(x, r);
+    const got = r.err ? '안 멈춰요' : wantTxt({ out: x.out ? r.out : null, mem: x.mem ? Object.fromEntries(Object.keys(x.mem).map((j) => [j, r.ram[j]])) : null });
+    h += `<tr data-a="atest" data-t="${k}" class="${k === cur.tsel ? 'cur' : ''}"><td>${k + 1}</td><td>${ramTxt((x.ram) || {})}</td><td class="want gap">${wantTxt(x)}</td><td class="gap ${prog.length ? (ok ? 'ok' : 'bad') : 'none'}">${prog.length ? got : '–'}</td></tr>`;
+  });
+  h += '</tbody></table>';
+  if (t.asm.ram) h += `<p class="ttnote">늘 들어 있는 칸: ${ramTxt(t.asm.ram)} · 나머지 빈 칸은 0</p>`;
+  h += checkHtml();
+  app.innerHTML = h;
+  hookHints();
+}
+
+function checkAsm() {
+  const t = cur.sub || cur.s;
+  let bad = 0, loop = false;
+  t.asm.tests.forEach((x, k) => { const r = asmRun(cur.prog, ramOf(t, k)); if (r.err) loop = true; if (!testOk(x, r)) bad++; });
+  if (!cur.prog.length) { cur.msg = '아직 줄이 없어요.'; return false; }
+  if (bad) { cur.msg = `입력 ${t.asm.tests.length}개 중 ${bad}개가 달라요.${loop ? ' HLT까지 못 가고 계속 도는 것도 있어요.' : ''}`; return false; }
+  return true;
+}
+
+function asmAction(a, t) {
+  const prog = cur.prog, k = cur.asel;
+  if (a === 'aop') {
+    const at = k == null ? prog.length : k + 1;
+    changeProg(() => prog.splice(at, 0, { op: t.dataset.op, n: 0 }));
+    cur.asel = at;
+  } else if (a === 'asel') {
+    const j = +t.dataset.line;
+    cur.asel = cur.asel === j ? null : j;
+  } else if (a === 'ainc' || a === 'adec') {
+    changeProg(() => { prog[k].n = (prog[k].n + (a === 'ainc' ? 1 : 15)) % 16; });
+  } else if (a === 'aup' || a === 'adown') {
+    const j = a === 'aup' ? k - 1 : k + 1;
+    changeProg(() => { [prog[k], prog[j]] = [prog[j], prog[k]]; });
+    cur.asel = j;
+  } else if (a === 'adel') {
+    changeProg(() => prog.splice(k, 1));
+    cur.asel = prog.length ? Math.min(k, prog.length - 1) : null;
+  } else if (a === 'atest') {
+    cur.tsel = +t.dataset.t;
+    cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+  } else if (a === 'astep') {
+    asmStep(prog, cur.m);
+  } else if (a === 'arun') {
+    while (!cur.m.halted && cur.m.steps < 2000) asmStep(prog, cur.m);
+  } else if (a === 'areset') {
+    cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+  }
 }
 
 // ---------- 힌트 ----------
@@ -437,7 +567,14 @@ function nearRandom(spec) {
 }
 
 function near() {
-  const s = cur.s, spec = specOf();
+  const s = cur.s, spec = specOf(), t = cur.sub || s;
+  if (t.asm) {
+    const sol = parseProg(t.sol), keep = Math.max(1, sol.length - Math.ceil(sol.length / 3));
+    changeProg(() => { cur.prog.splice(0, cur.prog.length, ...sol.slice(0, keep)); });
+    cur.asel = null;
+    cur.nearMsg = `앞 ${keep}줄을 놓았어요 — 나머지 ${sol.length - keep}줄을 이어 써요.`;
+    return;
+  }
   if (s.random) {
     const { circ, row } = nearRandom(spec);
     change((c) => { c.parts = circ.parts; c.wires = circ.wires; });
@@ -464,6 +601,7 @@ function checkSeq(spec) {
 
 function check() {
   const spec = specOf(), n = spec.ins.length;
+  if (spec.asm) { if (!checkAsm()) return; return passed(); }
   if (spec.seq) { if (!checkSeq(spec)) return; return passed(); }
   let bad = 0, cyc = false;
   for (let r = 0; r < 1 << n; r++) {
@@ -481,7 +619,7 @@ function check() {
 }
 
 function passed() {
-  const s = cur.s, cost = costOf(cur.circ);
+  const s = cur.s, asm = !!(cur.sub || s).asm, cost = asm ? cur.prog.length : costOf(cur.circ);
   cur.pass = true;
   cur.share = null;
   cur.sel = null;
@@ -496,7 +634,8 @@ function passed() {
   if (s.par && (v.best == null || cost < v.best)) v.best = cost;
   persist();
   let m = s.rounds ? `${s.rounds}번 연달아 맞았어요!` : '맞았어요!';
-  if (s.par) m += cost <= s.par ? ` NAND ${cost}개 몫 — 별 두 개.` : ` NAND ${cost}개 몫. ${s.par}개 이하면 별 하나 더.`;
+  const unit = asm ? '줄' : '개', what = asm ? `${cost}줄` : `NAND ${cost}개 몫`;
+  if (s.par) m += cost <= s.par ? ` ${what} — 별 두 개.` : ` ${what}. ${s.par}${unit} 이하면 별 하나 더.`;
   if (first && s.unlock) m += ` 이제부터 <b>${s.unlock}</b>를 상자 하나로 써요.`;
   cur.msg = m;
   cur.share = shareText(s, v);
@@ -545,7 +684,17 @@ function tapTarget(t) {
   }
   const a = t.dataset.a;
   if (a) {
-    if (a === 'undo' && cur.undo.length) {
+    if (['aop', 'asel', 'ainc', 'adec', 'aup', 'adown', 'adel', 'atest', 'astep', 'arun', 'areset'].includes(a)) {
+      asmAction(a, t);
+    } else if (a === 'undo' && cur.undo.length && cur.prog && (cur.sub || cur.s).asm) {
+      cur.prog = JSON.parse(cur.undo.pop());
+      if (!temp(cur.s)) { rec(cur.s.id).prog = cur.prog; persist(); }
+      cur.asel = null; cur.msg = ''; cur.pass = false;
+      cur.m = asmInit(ramOf(cur.sub || cur.s, cur.tsel));
+    } else if (a === 'reset' && (cur.sub || cur.s).asm) {
+      changeProg(() => cur.prog.splice(0));
+      cur.asel = null;
+    } else if (a === 'undo' && cur.undo.length) {
       cur.circ = JSON.parse(cur.undo.pop());
       if (!temp(cur.s)) { rec(cur.s.id).circ = cur.circ; persist(); }
       cur.sel = null; cur.msg = ''; cur.pass = false;
@@ -583,7 +732,7 @@ function tapTarget(t) {
       cur.live = {}; cur.stepAt = null;
       cur.circ = { parts: [], wires: {} };
       cur.undo = []; cur.pass = false; cur.msg = ''; cur.nearMsg = '';
-      cur.inVals = specOf().ins.map(() => 0);
+      setupTask();
       window.scrollTo(0, 0);
     }
     return renderStage();
