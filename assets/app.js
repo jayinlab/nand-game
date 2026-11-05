@@ -52,7 +52,7 @@ function evaluate(circ, inVals, nOut) {
     visiting[p.id] = true;
     const def = PARTS[p.type];
     const ins = def.ins.map((_, i) => src(circ.wires[p.id + ':' + i]));
-    const r = ins.some((v) => v == null) ? null : def.fn(ins).map((v) => (v ? 1 : 0));
+    const r = ins.some((v) => v == null) ? null : (def.fn ? def.fn(ins) : def.seq({}, ins)).map((v) => (v ? 1 : 0));
     visiting[p.id] = false;
     memo[p.id] = r;
     return r;
@@ -64,6 +64,33 @@ function evaluate(circ, inVals, nOut) {
   }
   return { outs, src, get cycle() { return cycle; } };
 }
+
+// 3부부터: 고리가 있는 판. 부품마다 출력을 들고 있다가(mem) 값이 멈출 때까지 차례로 다시 계산한다.
+// 기억 상자(seq)는 속 상태도 mem에 둔다. 64번 돌아도 안 멈추면 「흔들림」.
+function simulate(circ, inVals, nOut, mem) {
+  for (const p of circ.parts) if (!mem[p.id]) mem[p.id] = { st: {}, out: PARTS[p.type].outs.map(() => 0) };
+  const val = (key) => {
+    if (key == null) return 0;
+    const [a, k] = key.split(':');
+    if (a === 'in') return inVals[+k];
+    return mem[a] ? mem[a].out[+k] : 0;
+  };
+  let stable = false;
+  for (let pass = 0; pass < 64 && !stable; pass++) {
+    stable = true;
+    for (const p of circ.parts) {
+      const def = PARTS[p.type], m = mem[p.id];
+      const ins = def.ins.map((_, i) => val(circ.wires[p.id + ':' + i]));
+      const o = (def.seq ? def.seq(m.st, ins) : def.fn(ins)).map((v) => (v ? 1 : 0));
+      if (o.some((v, k) => v !== m.out[k])) { stable = false; m.out = o; }
+    }
+  }
+  const outs = [];
+  for (let i = 0; i < nOut; i++) { const w = circ.wires['out:' + i]; outs.push(w == null ? null : val(w)); }
+  return { outs, src: val, cycle: false, osc: !stable };
+}
+const runSteps = (circ, spec, upto = spec.steps.length - 1, mem = {}) =>
+  spec.steps.slice(0, upto + 1).map((x) => simulate(circ, x, spec.outs.length, mem));
 
 const bitsOf = (r, n) => Array.from({ length: n }, (_, i) => (r >> (n - 1 - i)) & 1);
 const costOf = (circ) => circ.parts.reduce((t, p) => t + PARTS[p.type].cost, 0);
@@ -91,6 +118,10 @@ function specOf() {
     };
   }
   const t = cur.sub || s;
+  if (t.steps) {
+    const steps = t.steps.map((x) => [...x].map(Number)), st = {};
+    return { ins: t.ins, outs: t.outs, seq: true, steps, want: steps.map((x) => t.model(st, x).map((v) => (v == null ? null : v ? 1 : 0))) };
+  }
   return { ins: t.ins, outs: t.outs, expect: (vals) => t.fn(vals).map((v) => (v ? 1 : 0)) };
 }
 
@@ -110,6 +141,7 @@ function openStage(i) {
     circ: !temp(s) && v.circ ? JSON.parse(JSON.stringify(v.circ)) : { parts: [], wires: {} },
     table: s.random ? randomTable(s.random) : null,
     sub: s.pool ? pickPool(s) : null,
+    live: {}, stepAt: null,
   };
   cur.inVals = specOf().ins.map(() => 0);
   renderStage();
@@ -227,6 +259,32 @@ function statusText() {
   return '점선 빈 칸을 누르면 그리로 옮겨요.';
 }
 
+// 3부부터: 시간 줄 표. 전원을 켠 뒤 위에서 아래로 차례로 넣는다. 원함이 「·」이면 그 칸은 안 본다.
+function timeline(spec) {
+  const got = runSteps(cur.circ, spec).map((e) => e.outs);
+  const no = spec.outs.length;
+  let h = '<table class="tt tl"><thead><tr><th>#</th>';
+  h += spec.ins.map((x) => `<th>${x}</th>`).join('');
+  h += spec.outs.map((x, k) => `<th class="want${k === 0 ? ' gap' : ''}">${no > 1 ? x : '원함'}</th>`).join('');
+  h += spec.outs.map((x, k) => `<th class="${k === 0 ? 'gap' : ''}">${no > 1 ? x : '지금'}</th>`).join('');
+  h += '</tr>';
+  if (no > 1) h += `<tr class="sub"><th colspan="${spec.ins.length + 1}"></th><th colspan="${no}" class="gap">원함</th><th colspan="${no}" class="gap">지금</th></tr>`;
+  h += '</thead><tbody>';
+  spec.steps.forEach((vals, r) => {
+    const want = spec.want[r];
+    const ci = spec.ins.indexOf('clk');
+    const edge = ci >= 0 && vals[ci] === 1 && r > 0 && spec.steps[r - 1][ci] === 0;
+    h += `<tr data-step="${r}" class="${r === cur.stepAt ? 'cur' : ''}${edge ? ' edge' : ''}"><td class="sn">${r + 1}${edge ? '↑' : ''}</td>`;
+    h += vals.map((v) => `<td>${v}</td>`).join('');
+    h += want.map((v, k) => `<td class="want${k === 0 ? ' gap' : ''}">${v == null ? '·' : v}</td>`).join('');
+    h += got[r].map((v, k) => `<td class="${k === 0 ? 'gap ' : ''}${v == null ? 'none' : want[k] == null ? '' : v === want[k] ? 'ok' : 'bad'}">${v == null ? '–' : v}</td>`).join('');
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+  h += `<p class="ttnote">위에서부터 차례로 넣어요${spec.ins.includes('clk') ? ' · ↑ = clk가 0→1로 바뀐 줄' : ''} · 「·」은 안 봐요 · 줄을 누르면 그 순간까지 돌린 판</p>`;
+  return h;
+}
+
 const TT_MAX = 16;
 function truthTable(spec) {
   const n = spec.ins.length, rows = 1 << n;
@@ -268,7 +326,8 @@ function truthTable(spec) {
 function renderStage() {
   const { s, i } = cur;
   const spec = specOf();
-  const ev = evaluate(cur.circ, cur.inVals, spec.outs.length);
+  if (spec.seq && cur.stepAt != null) { cur.live = {}; runSteps(cur.circ, spec, cur.stepAt - 1, cur.live); }
+  const ev = spec.seq ? simulate(cur.circ, cur.inVals, spec.outs.length, cur.live) : evaluate(cur.circ, cur.inVals, spec.outs.length);
   const cost = costOf(cur.circ);
   const v = rec(s.id);
   const avail = partsFor(i);
@@ -280,9 +339,10 @@ function renderStage() {
   if (sel && sel.t === 'part') tools += `<button data-a="del" class="warn">부품 지우기</button>`;
   if (sel && sel.t === 'sink' && cur.circ.wires[sel.key]) tools += `<button data-a="cut" class="warn">선 끊기</button>`;
   tools += `<button data-a="reset" ${cur.circ.parts.length ? '' : 'disabled'}>처음부터</button>`;
+  if (spec.seq) tools += `<button data-a="power">전원 다시</button>`;
 
   let after = '';
-  if (cur.pass && s.rounds && cur.round < s.rounds) after = `<button data-a="round" class="primary">다음 표 →</button>`;
+  if (cur.pass && s.rounds && cur.round < s.rounds) after = `<button data-a="round" class="primary">${s.pool ? '다음 문제' : '다음 표'} →</button>`;
   else if (cur.pass && next) after = `<a class="btn primary" href="#s/${next.id}">다음: ${next.id} ${next.title} →</a>`;
   else if (cur.pass) after = `<a class="btn primary" href="#">목록으로</a>`;
 
@@ -296,11 +356,11 @@ function renderStage() {
     ${hintBox(cur.sub || s)}
   </section>
   <div class="board">${boardSvg(spec, ev)}</div>
-  <p class="status">${ev.cycle ? '<b>고리가 있어요</b> — 신호가 제자리로 돌아와서 값이 안 정해져요. 3부(기억)에서 이 고리를 일부러 써요. ' : ''}${statusText()}</p>
+  <p class="status">${ev.osc ? '<b>값이 멈추지 않아요</b> — 고리가 계속 뒤집혀요(예: NOT이 자기 자신으로). ' : ''}${ev.cycle ? '<b>고리가 있어요</b> — 신호가 제자리로 돌아와서 값이 안 정해져요. 3부(기억)에서 이 고리를 일부러 써요. ' : ''}${statusText()}</p>
   <div class="tools">${tools}</div>
   <div class="palette">${avail.map((t) => `<button data-add="${t}">${t}<small>${PARTS[t].cost}</small></button>`).join('')}</div>
   <p class="cost">NAND ${cost}개 몫${s.par ? ` · 별 두 개는 ${s.par}개 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''}</p>
-  ${truthTable(spec)}
+  ${spec.seq ? timeline(spec) : truthTable(spec)}
   <div class="check">
     ${cur.pass ? '' : `<button data-a="check" class="primary">확인</button>`}
     ${cur.msg ? `<p class="msg ${cur.pass ? 'good' : 'badmsg'}">${cur.msg}</p>` : ''}
@@ -331,26 +391,31 @@ function hintBox(s) {
 function solCircuit(sol, insNames, keepLast) {
   const ids = {}, depth = {}, parts = [], wires = {}, outs = [];
   insNames.forEach((n, i) => { ids[n] = 'in:' + i; });
-  for (const st of sol.split(';').map((x) => x.trim()).filter(Boolean)) {
+  const sts = sol.split(';').map((x) => x.trim()).filter(Boolean);
+  let np = 0; // 고리(뒤에 나오는 이름 쓰기)를 위해 이름 → 부품 번호를 먼저 정한다
+  for (const st of sts) { const m = st.match(/^([^=@]+)=[A-Z]+\(/); if (m) ids[m[1]] = 'p' + ++np; }
+  for (const st of sts) {
     let m = st.match(/^@(\d+)=(.+)$/);
     if (m) { outs.push(['out:' + m[1], m[2]]); continue; }
     m = st.match(/^([^=]+)=([A-Z]+)\(([^)]*)\)$/);
     const [, name, type, args] = m;
-    const id = 'p' + (parts.length + 1);
+    const id = ids[name];
     const srcs = args.split(',').map((a) => a.trim().split('.')); // 'h.1' = h의 둘째 출력
     depth[name] = Math.max(0, ...srcs.map(([a]) => (a in depth ? depth[a] + 1 : 0)));
     srcs.forEach(([a, k = '0'], j) => { wires[id + ':' + j] = ids[a].startsWith('in:') ? ids[a] : ids[a] + ':' + k; });
-    ids[name] = id;
     parts.push({ id, type, d: depth[name] });
   }
+  // 깊이 0·1·2는 세 열, 더 깊으면 아래 띠로 내려가 다시 왼쪽부터(긴 판이 오른쪽 한 열에 쌓이지 않게)
   const used = new Set();
-  for (const p of parts) {
-    let col = Math.min(p.d, 2), row = 0;
+  let band = -1, top = 0;
+  for (const p of [...parts].sort((x, y) => Math.floor(x.d / 3) - Math.floor(y.d / 3))) {
+    if (Math.floor(p.d / 3) !== band) { band = Math.floor(p.d / 3); top = used.size ? Math.max(...[...used].map((k) => Math.floor(k / 3))) + 1 : 0; }
+    let col = p.d % 3, row = top;
     while (used.has(row * 3 + col)) row++;
     p.slot = row * 3 + col;
     used.add(p.slot);
-    delete p.d;
   }
+  parts.forEach((p) => delete p.d);
   let cut = outs.length; // 출력 선은 늘 비운다
   if (!keepLast) {
     const last = parts[parts.length - 1].id;
@@ -385,8 +450,21 @@ function near() {
   cur.sel = null;
 }
 
+function checkSeq(spec) {
+  const evs = runSteps(cur.circ, spec);
+  let bad = 0;
+  evs.forEach((e, r) => { if (spec.want[r].some((v, k) => v != null && e.outs[k] !== v)) bad++; });
+  if (bad) {
+    const osc = evs.some((e) => e.osc);
+    cur.msg = cur.circ.wires['out:0'] == null ? '출력에 선이 아직 없어요.' : `${evs.length}줄 중 ${bad}줄이 달라요.${osc ? ' 값이 멈추지 않는 줄도 있어요.' : ''}`;
+    return false;
+  }
+  return true;
+}
+
 function check() {
   const spec = specOf(), n = spec.ins.length;
+  if (spec.seq) { if (!checkSeq(spec)) return; return passed(); }
   let bad = 0, cyc = false;
   for (let r = 0; r < 1 << n; r++) {
     const vals = bitsOf(r, n);
@@ -399,6 +477,10 @@ function check() {
     cur.msg = cur.circ.wires['out:0'] == null ? '출력에 선이 아직 없어요.' : `${1 << n}줄 중 ${bad}줄이 표와 달라요.${cyc ? ' 고리도 있어요.' : ''}`;
     return;
   }
+  passed();
+}
+
+function passed() {
   const s = cur.s, cost = costOf(cur.circ);
   cur.pass = true;
   cur.share = null;
@@ -438,7 +520,7 @@ async function share(text) {
   window.open(`https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`, '_blank');
 }
 
-function tap(e) { tapTarget(e.target.closest('[data-k],[data-a],[data-add],[data-row]')); }
+function tap(e) { tapTarget(e.target.closest('[data-k],[data-a],[data-add],[data-row],[data-step]')); }
 
 function tapTarget(t) {
   if (!t) return;
@@ -449,6 +531,12 @@ function tapTarget(t) {
     const num = cur.circ.parts.reduce((m, p) => Math.max(m, +p.id.slice(1)), 0) + 1;
     change((c) => c.parts.push({ id: 'p' + num, type: t.dataset.add, slot }));
     cur.sel = null;
+    return renderStage();
+  }
+  if (t.dataset.step != null) {
+    const r = +t.dataset.step;
+    cur.inVals = specOf().steps[r].slice();
+    cur.stepAt = r;
     return renderStage();
   }
   if (t.dataset.row != null) {
@@ -478,6 +566,9 @@ function tapTarget(t) {
     } else if (a === 'share') {
       share(cur.share);
       return;
+    } else if (a === 'power') {
+      cur.live = {}; cur.stepAt = null;
+      cur.inVals = cur.inVals.map(() => 0);
     } else if (a === 'ttall') {
       cur.ttAll = !cur.ttAll;
     } else if (a === 'hintnext') {
@@ -489,6 +580,7 @@ function tapTarget(t) {
     } else if (a === 'round') {
       if (cur.s.random) cur.table = randomTable(cur.s.random);
       if (cur.s.pool) { cur.sub = pickPool(cur.s, cur.sub); cur.hintStep = 1; cur.ttAll = false; }
+      cur.live = {}; cur.stepAt = null;
       cur.circ = { parts: [], wires: {} };
       cur.undo = []; cur.pass = false; cur.msg = ''; cur.nearMsg = '';
       cur.inVals = specOf().ins.map(() => 0);
@@ -498,7 +590,7 @@ function tapTarget(t) {
   }
   const k = t.dataset.k, sel = cur.sel;
   if (k === 'bg') cur.sel = null;
-  else if (k === 'inbtn') { const i = +t.dataset.i; cur.inVals[i] ^= 1; }
+  else if (k === 'inbtn') { const i = +t.dataset.i; cur.inVals[i] ^= 1; cur.stepAt = null; }
   else if (k === 'src' || k === 'sink') {
     const key = t.dataset.key;
     const other = k === 'src' ? 'sink' : 'src';

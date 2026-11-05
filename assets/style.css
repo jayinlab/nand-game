@@ -68,6 +68,8 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .hints .nearnote { display: block; font-size: 12px; }
 .hints .nearmsg { color: var(--ink); }
 .subq { padding: 8px 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); }
+.tl tr.edge .sn { color: var(--accent); font-weight: 700; }
+.tl .sn { color: var(--mute); }
 .ttnote { font-size: 13px; color: var(--mute); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .board { margin: 10px -16px 0; background: var(--card); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .board-svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }

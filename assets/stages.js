@@ -3,6 +3,7 @@
 //   개념 — 새 부품을 처음 만든다. 풀면 그 부품이 다음 스테이지부터 상자 하나로 나온다.
 //   연습 — 같은 개념을 조건을 바꿔 다시(NAND만·적은 개수·표 보고 맞히기).
 //   시험 — 매번 새로 뽑는 표(random)나 앞 스테이지 하나(pool)를 연달아 맞힌다. 다시 들어가면 다른 문제.
+// 3부부터는 진리표 대신 시간 줄(steps, 입력만)과 모형(model)으로 판정한다. 모형이 null을 내면 그 칸은 안 본다.
 // hints는 차례로 하나씩 열린다. 다 열면 「정답 가까이 놓기」 — sol(이름=부품(입력,…); @출력번호=이름)의
 // 부품을 다 놓고, 출력 선과 마지막 부품으로 들어가는 선만 비워 둔다. 무작위 표는 app.js가 1인 줄 하나를 놓아 준다.
 
@@ -23,6 +24,16 @@ const b = (x) => (x ? 1 : 0);
 const n2 = (h, l) => h * 2 + l;
 const bitsN = (v, n) => Array.from({ length: n }, (_, i) => (v >> (n - 1 - i)) & 1);
 // 1비트 ALU 칸: o1o0 = 00 AND · 01 OR · 10 덧셈 · 11 XOR. 올림은 늘 덧셈의 올림.
+// 클록 모형: clk가 0→1로 바뀌면 바로 앞(clk=0) 줄의 입력으로 update — 래치 둘(앞은 clk=0, 뒤는 clk=1에 열림)과 같다
+const clocked = (ci, update, read) => (st, ins) => {
+  const c = ins[ci];
+  if (c && st.pc === 0 && st.prev) update(st, st.prev);
+  st.pc = c;
+  if (!c) st.prev = ins;
+  return read(st, ins);
+};
+// 클록 한 번 = 두 줄(clk 0, clk 1). 앞 글자들은 그 밖의 입력
+const tick = (...xs) => xs.flatMap((x) => [x + '0', x + '1']);
 const alu1 = (o1, o0, a, c, d) => [[a & c, a | c, a ^ c ^ d, a ^ c][o1 * 2 + o0], b(a + c + d >= 2)];
 
 // 부품. cost = NAND 몇 개 몫인지(별 두 개 기준에 쓴다).
@@ -39,6 +50,10 @@ export const PARTS = {
   HA: { ins: ['', ''], outs: ['s', 'c'], cost: 5, fn: ([a, c]) => [a ^ c, a & c] },
   FA: { ins: ['', '', 'c'], outs: ['s', 'c'], cost: 9, fn: ([a, c, d]) => [a ^ c ^ d, b(a + c + d >= 2)] },
   ALU: { ins: ['o1', 'o0', 'a', 'b', 'c'], outs: ['r', 'c'], cost: 30, fn: ([o1, o0, a, c, d]) => alu1(o1, o0, a, c, d) },
+  // 3부 기억 상자 — seq(속, 입력)는 속 상태를 가진다. 판은 값이 멈출 때까지 여러 번 부른다.
+  LATCH: { ins: ['d', 'st'], outs: ['q'], cost: 4, seq: (m, [d, s]) => { if (s) m.q = d; return [m.q | 0]; } },
+  DFF: { ins: ['d', 'clk'], outs: ['q'], cost: 9, seq: (m, [d, c]) => { if (!c) m.m = d; else m.q = m.m | 0; return [m.q | 0]; } },
+  BIT: { ins: ['d', 'st', 'clk'], outs: ['q'], cost: 13, seq: (m, [d, s, c]) => { if (!c) m.m = s ? d : m.q | 0; else m.q = m.m | 0; return [m.q | 0]; } },
 };
 
 const AB = ['A', 'B'];
@@ -325,5 +340,145 @@ export const STAGES = [
   {
     id: '2-20', book: 2, kind: '시험', title: '2부 시험', pool: ['2-6', '2-7', '2-10', '2-12', '2-14', '2-16'], rounds: 4,
     text: '2부에서 만든 회로 중 하나를 매번 뽑아요. 네 번 연달아. 넘기면 3부(기억)로 가요.',
+  },
+  // ---------- 3부 기억 ----------
+  {
+    id: '3-1', book: 3, kind: '개념', title: 'SR 래치',
+    text: '출력을 앞으로 되돌려 이으면(고리) 회로가 기억해요. S를 잠깐 1로 하면 Q=1, S를 0으로 돌려도 Q는 1로 남아요. R은 0으로 되돌려요(S와 R을 같이 1로 하진 않아요). 아래 표는 시간 순서예요 — 줄을 누르면 그 순간까지 돌려 봐요.',
+    hints: ['NOR 둘을 서로의 입력으로 엇갈려 이어요.', 'Q = NOR(R, P), P = NOR(S, Q) — P는 Q의 반대 쪽이라 출력엔 안 이어도 돼요.'],
+    sol: 'q=NOR(R,p); p=NOR(S,q); @0=q',
+    ins: ['S', 'R'], outs: ['Q'], par: 8,
+    steps: ['00', '10', '00', '01', '00', '10', '00'],
+    model: (st, [S, R]) => { if (S) st.q = 1; if (R) st.q = 0; return [st.q]; },
+  },
+  {
+    id: '3-2', book: 3, kind: '연습', title: 'SR 래치, NAND만으로', only: ['NAND'],
+    text: '같은 래치를 NAND로. NAND 고리는 「0을 넣으면 켜지는」 거꾸로라 입력을 한 번씩 뒤집어요.',
+    hints: ['NOT은 NAND(x,x). S·R을 먼저 뒤집어요.', 'Q = NAND(NOT S, P), P = NAND(NOT R, Q).'],
+    sol: 'a=NAND(S,S); b=NAND(R,R); q=NAND(a,p); p=NAND(b,q); @0=q',
+    ins: ['S', 'R'], outs: ['Q'], par: 4,
+    steps: ['00', '10', '00', '01', '00', '10', '00'],
+    model: (st, [S, R]) => { if (S) st.q = 1; if (R) st.q = 0; return [st.q]; },
+  },
+  {
+    id: '3-3', book: 3, kind: '개념', title: 'D 래치', unlock: 'LATCH',
+    text: 'st(저장)가 1인 동안 Q는 d를 따라가고, st가 0이 되면 마지막 d를 붙들어요. 상자로 쓰면 LATCH예요.',
+    hints: ['SR 래치의 S = d AND st, R = NOT d AND st 로도 되고…', '더 짧게: 선택기 출력을 그 0 점으로 되돌려 이으면, st=0일 때 자기 값을 계속 골라요 — MUX 하나.'],
+    sol: 'q=MUX(q,d,st); @0=q',
+    ins: ['d', 'st'], outs: ['Q'], par: 4,
+    steps: ['11', '10', '00', '01', '10', '11', '00'],
+    model: (st, [d, s]) => { if (s) st.q = d; return [st.q]; },
+  },
+  {
+    id: '3-4', book: 3, kind: '연습', title: 'D 래치, NAND 넷', only: ['NAND'],
+    text: 'D 래치를 NAND 넷으로. 진짜 칩 속 래치에 가까운 모양이에요.',
+    hints: ['NAND 래치(3-2) 두 입력을 「d와 st로 거른 것」으로 바꿔요.', 'n = NAND(d, st), m = NAND(n, st). 그다음 Q = NAND(n, P), P = NAND(m, Q).'],
+    sol: 'n=NAND(d,st); m=NAND(n,st); q=NAND(n,p); p=NAND(m,q); @0=q',
+    ins: ['d', 'st'], outs: ['Q'], par: 4,
+    steps: ['11', '10', '00', '01', '10', '11', '00'],
+    model: (st, [d, s]) => { if (s) st.q = d; return [st.q]; },
+  },
+  {
+    id: '3-5', book: 3, kind: '개념', title: 'D 플립플롭', unlock: 'DFF',
+    text: 'clk가 0→1로 바뀌는 순간의 d만 기억해요. 그 사이 d가 흔들려도 Q는 안 바뀌어요 — 컴퓨터 전체가 이 박자(클록)에 맞춰 움직여요. 상자로 쓰면 DFF예요.',
+    hints: ['래치 둘을 줄줄이: 앞 래치는 clk=0일 때 열리고, 뒤 래치는 clk=1일 때 열려요.', '앞 = LATCH(d, NOT clk), 뒤 = LATCH(앞, clk).'],
+    sol: 'n=NOT(clk); m=LATCH(d,n); q=LATCH(m,clk); @0=q',
+    ins: ['d', 'clk'], outs: ['Q'], par: 9,
+    steps: ['10', '11', '01', '00', '01', '10', '00', '01', '10', '11'],
+    model: clocked(1, (st, [d]) => { st.q = d; }, (st) => [st.q]),
+  },
+  {
+    id: '3-6', book: 3, kind: '연습', title: '플립플롭, NAND 아홉', only: ['NAND'],
+    text: 'D 플립플롭을 NAND만으로. 3-4 래치 둘과 NOT 하나 — 아홉 개예요.',
+    hints: ['NOT clk = NAND(clk, clk). 앞 래치는 st 자리에 NOT clk, 뒤 래치는 clk.', '앞: a=NAND(d, NOT clk), b=NAND(a, NOT clk), m=NAND(a, m2), m2=NAND(b, m). 뒤도 같은 모양으로 m과 clk.'],
+    sol: 'n=NAND(clk,clk); a=NAND(d,n); b=NAND(a,n); m=NAND(a,mb); mb=NAND(b,m); c=NAND(m,clk); e=NAND(c,clk); q=NAND(c,qb); qb=NAND(e,q); @0=q',
+    ins: ['d', 'clk'], outs: ['Q'], par: 9,
+    steps: ['10', '11', '01', '00', '01', '10', '00', '01', '10', '11'],
+    model: clocked(1, (st, [d]) => { st.q = d; }, (st) => [st.q]),
+  },
+  {
+    id: '3-7', book: 3, kind: '개념', title: '1비트 레지스터', unlock: 'BIT',
+    text: 'st가 1인 박자에만 d를 받아 넣고, st가 0이면 그대로 지켜요. 레지스터 한 칸이에요. 상자로 쓰면 BIT예요.',
+    hints: ['박자마다 DFF가 무언가를 받아요 — st=0이면 「지금 내 값」을 다시 받게 하면 돼요.', 'DFF(MUX(Q, d, st), clk). MUX의 0 점에 Q를 되돌려 이어요.'],
+    sol: 'm=MUX(q,d,st); q=DFF(m,clk); @0=q',
+    ins: ['d', 'st', 'clk'], outs: ['Q'], par: 13,
+    steps: tick('11', '00', '01', '10', '11'),
+    model: clocked(2, (st, [d, s]) => { if (s) st.q = d; }, (st) => [st.q]),
+  },
+  {
+    id: '3-8', book: 3, kind: '개념', title: '뒤집개',
+    text: '박자마다 Q가 0, 1, 0, 1… 로 뒤집혀요. 전원을 켜면 상자 속은 모두 0에서 시작해요.',
+    hints: ['DFF에 「내 값의 반대」를 넣어요.', 'DFF(NOT Q, clk).'],
+    sol: 'n=NOT(q); q=DFF(n,clk); @0=q',
+    ins: ['clk'], outs: ['Q'], par: 10,
+    steps: ['0', '1', '0', '1', '0', '1', '0', '1'],
+    model: clocked(0, (st) => { st.q = 1 - (st.q | 0); }, (st) => [st.q | 0]),
+  },
+  {
+    id: '3-9', book: 3, kind: '개념', title: '두 자리 카운터',
+    text: '박자마다 Q1Q0이 0, 1, 2, 3, 0… 으로 세요. 2-6 「하나 더하기」를 레지스터에 되먹이는 거예요. 4부 CPU의 「다음 명령어 번호(PC)」가 이것.',
+    hints: ['아래 자리는 3-8 뒤집개. 윗자리는 「아래 자리가 1일 때 뒤집기」.', 'Q0 = DFF(NOT Q0), Q1 = DFF(Q1 XOR Q0).'],
+    sol: 'n=NOT(a); a=DFF(n,clk); x=XOR(b,a); b=DFF(x,clk); @0=b; @1=a',
+    ins: ['clk'], outs: ['Q1', 'Q0'], par: 23,
+    steps: ['0', '1', '0', '1', '0', '1', '0', '1', '0', '1'],
+    model: clocked(0, (st) => { st.v = ((st.v | 0) + 1) & 3; }, (st) => bitsN(st.v | 0, 2)),
+  },
+  {
+    id: '3-10', book: 3, kind: '연습', title: '카운터 멈춤',
+    text: 'en이 1인 박자에만 세요. 0이면 그 자리에 멈춰요.',
+    hints: ['DFF 대신 BIT를 쓰면 st 점이 「이번 박자에 받을까」예요.', 'Q0 = BIT(NOT Q0, en, clk), Q1 = BIT(Q1 XOR Q0, en, clk).'],
+    sol: 'n=NOT(a); a=BIT(n,en,clk); x=XOR(b,a); b=BIT(x,en,clk); @0=b; @1=a',
+    ins: ['en', 'clk'], outs: ['Q1', 'Q0'], par: 31,
+    steps: tick('1', '1', '0', '0', '1', '1'),
+    model: clocked(1, (st, [en]) => { if (en) st.v = ((st.v | 0) + 1) & 3; }, (st) => bitsN(st.v | 0, 2)),
+  },
+  {
+    id: '3-11', book: 3, kind: '연습', title: '카운터 리셋',
+    text: 'rst가 1인 박자엔 0으로 돌아가고, 아니면 하나씩 세요.',
+    hints: ['다음 값 = rst이면 0, 아니면 하나 더한 값 — 「AND NOT rst」로 거르면 돼요.', 'Q0 ← NOR(Q0, rst), Q1 ← AND(Q1 XOR Q0, NOT rst).'],
+    sol: 'z=NOR(a,rst); a=DFF(z,clk); x=XOR(b,a); r=NOT(rst); y=AND(x,r); b=DFF(y,clk); @0=b; @1=a',
+    ins: ['rst', 'clk'], outs: ['Q1', 'Q0'], par: 29,
+    steps: tick('0', '0', '1', '0', '0', '0', '0'),
+    model: clocked(1, (st, [r]) => { st.v = r ? 0 : ((st.v | 0) + 1) & 3; }, (st) => bitsN(st.v | 0, 2)),
+  },
+  {
+    id: '3-12', book: 3, kind: '개념', title: '두 자리 레지스터',
+    text: 'st=1인 박자에 D1D0 두 자리를 한꺼번에 받아 넣어요. 16비트 레지스터는 이 칸이 16개.',
+    hints: ['BIT 둘. st와 clk는 둘에 똑같이.', 'Q1 = BIT(D1, st, clk), Q0 = BIT(D0, st, clk).'],
+    sol: 'a=BIT(D1,st,clk); b=BIT(D0,st,clk); @0=a; @1=b',
+    ins: ['D1', 'D0', 'st', 'clk'], outs: ['Q1', 'Q0'], par: 26,
+    steps: tick('101', '010', '011', '110', '000'),
+    model: clocked(3, (st, [d1, d0, s]) => { if (s) st.q = [d1, d0]; }, (st) => st.q || [null, null]),
+  },
+  {
+    id: '3-13', book: 3, kind: '개념', title: '기억 두 칸',
+    text: '주소 a로 칸을 골라요. st=1인 박자엔 고른 칸에 d를 쓰고, 출력은 늘 고른 칸을 읽어요. RAM의 가장 작은 모양이에요.',
+    hints: ['BIT 두 칸. 「쓰기」 신호 st를 주소에 따라 한 칸으로만 보내요(분배기), 읽기는 선택기.', 'DEMUX(st, a) → 두 BIT의 st 점. MUX(칸0, 칸1, a) → 출력.'],
+    sol: 'w=DEMUX(st,a); c=BIT(d,w,clk); e=BIT(d,w.1,clk); o=MUX(c,e,a); @0=o',
+    ins: ['a', 'd', 'st', 'clk'], outs: ['출력'], par: 35,
+    steps: [...tick('011', '101'), '0000', '1000', ...tick('111'), '0000', ...tick('001'), '1000', '0000'],
+    model: clocked(3, (st, [a, d, s]) => { st.m = st.m || [null, null]; if (s) st.m[a] = d; }, (st, [a]) => [(st.m || [null, null])[a]]),
+  },
+  {
+    id: '3-14', book: 3, kind: '연습', title: '기억 네 칸',
+    text: '주소 두 자리(a1a0)로 네 칸. 쓰고 나서 차례로 읽어 봐요.',
+    hints: ['분배기·선택기를 두 층으로. 먼저 a1로 반을 고르고, 그 안에서 a0.', '쓰기: DEMUX(st,a1) → 두 DEMUX(…,a0) → BIT 넷. 읽기: MUX(칸0,칸1,a0)·MUX(칸2,칸3,a0) → MUX(…,a1).'],
+    sol: 'w=DEMUX(st,a1); x=DEMUX(w,a0); y=DEMUX(w.1,a0); c0=BIT(d,x,clk); c1=BIT(d,x.1,clk); c2=BIT(d,y,clk); c3=BIT(d,y.1,clk); m=MUX(c0,c1,a0); n=MUX(c2,c3,a0); o=MUX(m,n,a1); @0=o',
+    ins: ['a1', 'a0', 'd', 'st', 'clk'], outs: ['출력'], par: 79,
+    steps: [...tick('1011', '0111', '1101', '0001'), '00000', '01000', '10000', '11000', ...tick('0011'), '01000', '00000'],
+    model: clocked(4, (st, [a1, a0, d, s]) => { st.m = st.m || [null, null, null, null]; if (s) st.m[n2(a1, a0)] = d; }, (st, [a1, a0]) => [(st.m || [null, null, null, null])[n2(a1, a0)]]),
+  },
+  {
+    id: '3-15', book: 3, kind: '개념', title: '누산기',
+    text: 'st=1인 박자마다 D1D0을 쌓아 더해요(두 자리라 넘치면 돌아요). 2부 덧셈 + 3부 레지스터 — 4부 CPU의 심장이에요.',
+    hints: ['레지스터 값과 D를 더해서 다시 레지스터로.', '합0 = HA(Q0, D0), 합1 = Q1 XOR D1 XOR (HA 올림). 둘을 BIT(…, st, clk)로, BIT 출력을 덧셈 입력으로 되돌려요.'],
+    sol: 'h=HA(r,D0); x=XOR(t,D1); y=XOR(x,h.1); r=BIT(h,st,clk); t=BIT(y,st,clk); @0=t; @1=r',
+    ins: ['D1', 'D0', 'st', 'clk'], outs: ['Q1', 'Q0'], par: 39,
+    steps: tick('011', '101', '110', '111', '011'),
+    model: clocked(3, (st, [d1, d0, s]) => { if (s) st.v = ((st.v | 0) + n2(d1, d0)) & 3; }, (st) => bitsN(st.v | 0, 2)),
+  },
+  {
+    id: '3-16', book: 3, kind: '시험', title: '3부 시험', pool: ['3-3', '3-5', '3-7', '3-9', '3-11', '3-13'], rounds: 4,
+    text: '3부에서 만든 기억 회로 중 하나를 매번 뽑아요. 네 번 연달아. 넘기면 4부(CPU)로 가요.',
   },
 ];
