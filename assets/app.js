@@ -217,11 +217,56 @@ function geometry(spec) {
 
 const cls = (v) => (v == null ? 'x' : v ? 'on' : 'off');
 
+// 게이트는 회로도 기호로, 나머지 부품은 칩으로 그린다. 점 자리는 geometry()와 같다(입력 왼쪽 cx-22, 출력 오른쪽 cx+22).
+const GATES = new Set(['NAND', 'NOT', 'AND', 'OR', 'NOR', 'XOR', 'XNOR']);
+function gatePath(type, cx, cy) {
+  const one = type === 'NOT', hy = one ? 11 : 18, y0 = cy - hy, y1 = cy + hy;
+  const bub = type === 'NAND' || type === 'NOR' || type === 'XNOR' || one;
+  const xe = bub ? cx + 12 : cx + 18, L = cx - BW / 2, R = cx + BW / 2;
+  const ins = one ? [cy] : [cy - PS / 2, cy + PS / 2];
+  let stub = ins.map((y) => `M${L} ${y}H${cx - 8}`).join('') + `M${bub ? xe + 7 : xe} ${cy}H${R}`, body, back = '';
+  if (one) body = `M${cx - 14} ${y0}L${xe} ${cy}L${cx - 14} ${y1}Z`;
+  else if (type === 'NAND' || type === 'AND') body = `M${cx - 16} ${y0}H${xe - hy}A${hy} ${hy} 0 0 1 ${xe - hy} ${y1}H${cx - 16}Z`;
+  else {
+    const x0 = type === 'OR' || type === 'NOR' ? cx - 17 : cx - 13;
+    body = `M${x0} ${y0}Q${x0 + 9} ${cy} ${x0} ${y1}Q${xe - 14} ${y1} ${xe} ${cy}Q${xe - 14} ${y0} ${x0} ${y0}Z`;
+    if (type[0] === 'X') back = `M${x0 - 5} ${y0}Q${x0 + 4} ${cy} ${x0 - 5} ${y1}`;
+  }
+  return { stub, body, back, bubble: bub ? [xe + 3.5, cy] : null, hy };
+}
+function partShape(type, cx, cy, h, sel, out) {
+  const def = PARTS[type];
+  if (GATES.has(type)) {
+    const g = gatePath(type, cx, cy);
+    let s = `<path d="${g.stub}" class="stub"/>`;
+    if (g.back) s += `<path d="${g.back}" class="gback${sel ? ' sel' : ''}"/>`;
+    s += `<path d="${g.body}" class="part gate${out ? ' lit' : ''}${sel ? ' sel' : ''}"/>`;
+    if (g.bubble) s += `<circle cx="${g.bubble[0]}" cy="${g.bubble[1]}" r="3.5" class="part bubble${sel ? ' sel' : ''}"/>`;
+    return s + `<text x="${cx}" y="${cy + g.hy + 10}" class="glabel">${type}</text>`;
+  }
+  const mid = (ls) => ls.length % 2 === 1 && ls[(ls.length - 1) / 2], top = mid(def.ins) || mid(def.outs) ? 9 : 0; // 가운데 줄에 핀 이름이 있으면 이름을 머리 칸으로
+  const x = cx - BW / 2, y = cy - h / 2 - top, w = BW;
+  let s = `<rect x="${x}" y="${y}" width="${w}" height="${h + top}" rx="5" class="part chip${sel ? ' sel' : ''}"/>`;
+  s += `<path d="M${cx - 5} ${y}A5 5 0 0 0 ${cx + 5} ${y}" class="notch"/>`;
+  s += `<text x="${cx}" y="${top ? y + 15 : cy + 3.5}" class="plabel"${type.length > 4 ? ' textLength="30" lengthAdjust="spacingAndGlyphs"' : ''}>${type}</text>`;
+  def.ins.forEach((l, k) => { if (l) s += `<text x="${x + 8}" y="${cy - ((def.ins.length - 1) * PS) / 2 + k * PS + 3}" class="pin">${l}</text>`; });
+  def.outs.forEach((l, k) => { if (l) s += `<text x="${x + w - 8}" y="${cy - ((def.outs.length - 1) * PS) / 2 + k * PS + 3}" class="pin r">${l}</text>`; });
+  return s;
+}
+// 단추에 붙는 작은 기호
+function gateIcon(type) {
+  if (!GATES.has(type)) return '';
+  const g = gatePath(type, 22, 20);
+  return `<svg class="gicon" viewBox="0 0 44 40" aria-hidden="true"><path d="${g.stub}"/>${g.back ? `<path d="${g.back}"/>` : ''}<path d="${g.body}" class="b"/>${g.bubble ? `<circle cx="${g.bubble[0]}" cy="${g.bubble[1]}" r="3.5" class="b"/>` : ''}</svg>`;
+}
+
 function boardSvg(spec, ev) {
   const g = geometry(spec);
   const sel = cur.sel;
   let s = `<svg viewBox="0 0 ${W} ${g.H}" class="board-svg" role="img" aria-label="회로판">`;
-  s += `<rect x="0" y="0" width="${W}" height="${g.H}" class="bg" data-k="bg"/>`;
+  s += `<defs><pattern id="dots" width="14" height="14" patternUnits="userSpaceOnUse"><circle cx="7" cy="7" r="1" class="dot"/></pattern>`;
+  s += `<filter id="glow" filterUnits="userSpaceOnUse" x="-20" y="-20" width="${W + 40}" height="${g.H + 40}"><feGaussianBlur stdDeviation="2.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`;
+  s += `<rect x="0" y="0" width="${W}" height="${g.H}" class="bg" fill="url(#dots)" data-k="bg"/>`;
 
   if (sel && sel.t === 'part') {
     const used = new Set(cur.circ.parts.map((p) => p.slot));
@@ -236,27 +281,27 @@ function boardSvg(spec, ev) {
     const a = g.srcPos(src), z = g.sinkPos(sink);
     if (!a || !z) continue;
     const dx = Math.max(24, Math.abs(z[0] - a[0]) / 2);
-    s += `<path d="M${a[0]} ${a[1]} C${a[0] + dx} ${a[1]} ${z[0] - dx} ${z[1]} ${z[0]} ${z[1]}" class="wire ${cls(ev.src(src))}"/>`;
+    const d = `M${a[0]} ${a[1]} C${a[0] + dx} ${a[1]} ${z[0] - dx} ${z[1]} ${z[0]} ${z[1]}`, c = cls(ev.src(src));
+    s += `<path d="${d}" class="wire ${c}"${c === 'on' ? ' filter="url(#glow)"' : ''}/>`;
+    if (c === 'on') s += `<path d="${d}" class="flow"/>`;
   }
 
   for (const p of cur.circ.parts) {
     const def = PARTS[p.type], b = g.box[p.id];
     const on = sel && sel.t === 'part' && sel.id === p.id;
-    s += `<g data-k="part" data-id="${p.id}"><rect x="${b.cx - BW / 2}" y="${b.cy - b.h / 2}" width="${BW}" height="${b.h}" rx="6" class="part${on ? ' sel' : ''}"/>`;
-    s += `<text x="${b.cx}" y="${b.cy + 4}" class="plabel">${p.type}</text>`;
-    def.ins.forEach((l, k) => { if (l) { const q = g.sinkPos(p.id + ':' + k); s += `<text x="${q[0] + 5}" y="${q[1] + 3}" class="pin">${l}</text>`; } });
-    def.outs.forEach((l, k) => { if (l) { const q = g.srcPos(p.id + ':' + k); s += `<text x="${q[0] - 5}" y="${q[1] + 3}" class="pin r">${l}</text>`; } });
+    s += `<g data-k="part" data-id="${p.id}"><rect x="${b.cx - BW / 2}" y="${b.cy - b.h / 2}" width="${BW}" height="${b.h}" class="phit"/>`;
+    s += partShape(p.type, b.cx, b.cy, b.h, on, ev.src(p.id + ':0'));
     s += `</g>`;
   }
 
   spec.ins.forEach((name, i) => {
     const [x, y] = g.srcPos('in:' + i), v = cur.inVals[i];
-    s += `<g data-k="inbtn" data-i="${i}"><rect x="4" y="${y - 18}" width="46" height="36" rx="8" class="io ${v ? 'on' : 'off'}"/>`;
-    s += `<text x="17" y="${y + 5}" class="ioname">${name}</text><text x="40" y="${y + 5}" class="ioval">${v}</text></g>`;
+    s += `<g data-k="inbtn" data-i="${i}" class="sw ${v ? 'on' : 'off'}"><rect x="4" y="${y - 18}" width="46" height="36" rx="10" class="io ${v ? 'on' : 'off'}"${v ? ' filter="url(#glow)"' : ''}/>`;
+    s += `<text x="17" y="${y + 5}" class="ioname">${name}</text><rect x="31" y="${y - 9}" width="15" height="18" rx="5" class="knob"/><text x="38.5" y="${y + 4.5}" class="ioval">${v}</text></g>`;
   });
   spec.outs.forEach((name, i) => {
     const [x, y] = g.sinkPos('out:' + i), v = ev.outs[i];
-    s += `<rect x="310" y="${y - 18}" width="46" height="36" rx="8" class="io lamp ${cls(v)}"/>`;
+    s += `<rect x="310" y="${y - 18}" width="46" height="36" rx="10" class="io lamp ${cls(v)}"${v ? ' filter="url(#glow)"' : ''}/>`;
     s += `<text x="333" y="${y - 3}" class="ioname sm">${name}</text><text x="333" y="${y + 12}" class="ioval c">${v == null ? '–' : v}</text>`;
   });
 
@@ -375,7 +420,7 @@ function renderStage() {
   <div class="board">${boardSvg(spec, ev)}</div>
   <p class="status">${ev.osc ? '<b>값이 멈추지 않아요</b> — 고리가 계속 뒤집혀요(예: NOT이 자기 자신으로). ' : ''}${ev.cycle ? '<b>고리가 있어요</b> — 신호가 제자리로 돌아와서 값이 안 정해져요. 3부(기억)에서 이 고리를 일부러 써요. ' : ''}${statusText()}</p>
   <div class="tools">${tools}</div>
-  <div class="palette">${avail.map((t) => `<button data-add="${t}">${t}<small>${PARTS[t].cost}</small></button>`).join('')}</div>
+  <div class="palette">${avail.map((t) => `<button data-add="${t}">${gateIcon(t)}${t}<small>${PARTS[t].cost}</small></button>`).join('')}</div>
   <p class="cost">NAND ${cost}개 몫${s.par ? ` · 별 두 개는 ${s.par}개 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''}</p>
   ${spec.seq ? timeline(spec) : truthTable(spec)}
   ${checkHtml()}`;
@@ -1070,17 +1115,23 @@ function tapTarget(t) {
 function renderList() {
   const firstOpen = STAGES.findIndex((s, i) => unlocked(i) && !(save[s.id] || {}).solved);
   const solved = STAGES.filter((s) => (save[s.id] || {}).solved).length;
-  let h = `<header class="hero"><h1>NAND 게임</h1><p>NAND 게이트 하나에서 시작해 GPU까지. 만든 부품은 다음 단계에서 상자 하나가 되고, 같은 개념을 여러 번 다르게 풀며 손에 익혀요.</p>
-  <p class="prog">${solved} / ${STAGES.length} 풂 · 지금 열린 건 ${[...new Set(STAGES.map((x) => x.book))].join('·')}부${firstOpen >= 0 ? ` · <a href="#s/${STAGES[firstOpen].id}">이어서 ${STAGES[firstOpen].id} →</a>` : ''}</p></header>`;
+  const pct = Math.round((solved / STAGES.length) * 100);
+  const emblem = `<svg class="emblem" viewBox="0 0 120 64" aria-hidden="true"><path d="M4 20H34M4 44H34M92 32H116" class="ew"/><path d="M30 8H58A24 24 0 0 1 58 56H30Z" class="eb"/><circle cx="88" cy="32" r="5" class="eb"/><circle cx="4" cy="20" r="3.5" class="ep"/><circle cx="4" cy="44" r="3.5" class="ep"/><circle cx="116" cy="32" r="3.5" class="ep"/></svg>`;
+  let h = `<header class="hero">${emblem}<h1>NAND 게임</h1><p>NAND 게이트 하나에서 시작해 GPU까지. 만든 부품은 다음 단계에서 상자 하나가 되고, 같은 개념을 여러 번 다르게 풀며 손에 익혀요.</p>
+  <div class="meter"><div class="mrow"><b>${solved}</b><span>/ ${STAGES.length} 풂</span><span class="mpct">${pct}%</span></div><div class="mbar"><i style="width:${pct}%"></i></div>
+  ${firstOpen >= 0 ? `<a class="btn primary go" href="#s/${STAGES[firstOpen].id}">이어서 ${STAGES[firstOpen].id} ${STAGES[firstOpen].title} →</a>` : ''}</div></header>`;
   for (const bk of BOOKS) {
     const list = STAGES.filter((s) => s.book === bk.no);
-    h += `<section class="book${list.length ? '' : ' soon'}"><h2><span class="bno">${bk.no}부</span> ${bk.name}</h2><p class="bdesc">${bk.desc}</p>`;
+    const done = list.filter((s) => (save[s.id] || {}).solved).length;
+    const full = list.length && done === list.length;
+    h += `<section class="book${list.length ? '' : ' soon'}${full ? ' full' : ''}"><div class="bhead"><span class="bno">${bk.no}</span><div class="btxt"><h2>${bk.name}</h2><p class="bdesc">${bk.desc}</p></div>${list.length ? `<span class="bcount">${done}/${list.length}</span>` : ''}</div>`;
+    if (list.length) h += `<div class="bbar"><i style="width:${(done / list.length) * 100}%"></i></div>`;
     if (!list.length) { h += '<p class="soonp">준비 중</p></section>'; continue; }
     h += '<ol class="stages">';
     for (const s of list) {
       const i = idxOf(s.id), open = unlocked(i), v = save[s.id] || {};
       const inner = `<span class="snum">${s.id}</span><span class="stitle">${s.title}</span><span class="kind k-${s.kind}">${s.kind}</span><span class="sstar">${open ? starStr(s) : '🔒'}</span>${v.count ? `<span class="count">${v.count}</span>` : ''}`;
-      h += `<li class="${i === firstOpen ? 'nextup' : ''}">${open ? `<a href="#s/${s.id}">${inner}</a>` : `<span class="locked">${inner}</span>`}</li>`;
+      h += `<li class="${i === firstOpen ? 'nextup' : ''}${v.solved ? ' done' : ''}">${open ? `<a href="#s/${s.id}">${inner}</a>` : `<span class="locked">${inner}</span>`}</li>`;
     }
     h += '</ol></section>';
   }
