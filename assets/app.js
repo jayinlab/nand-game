@@ -22,6 +22,37 @@ const starsOf = (s) => {
 };
 const starStr = (s) => '★'.repeat(starsOf(s)) + '☆'.repeat(maxStars(s) - starsOf(s));
 
+// 트로피 — 부를 다 풀면 은메달, 그 부의 별을 다 모으면 금메달
+function bookStars(no) {
+  const list = STAGES.filter((x) => x.book === no);
+  return { list, got: list.reduce((t, x) => t + starsOf(x), 0), all: list.reduce((t, x) => t + maxStars(x), 0) };
+}
+function bookMedal(no) {
+  const { list, got, all } = bookStars(no);
+  if (!list.length || list.some((x) => !(save[x.id] || {}).solved)) return null;
+  return got === all ? 'gold' : 'silver';
+}
+// 부마다 대표 그림(24×24 선): 게이트 · 덧셈 · 클록 · CPU · 레인 · 기억 칸 · 웨이브 · 링 · 겹 내려가기 · V
+const MEDAL_ICON = {
+  1: '<path d="M5 6h7a6 6 0 0 1 0 12H5z"/><circle cx="19.5" cy="12" r="1.6"/>',
+  2: '<path d="M17 6H7l5 6-5 6h10"/>',
+  3: '<path d="M3 16h4V8h5v8h5V8h4"/>',
+  4: '<rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 4v3M14 4v3M10 17v3M14 17v3M4 10h3M4 14h3M17 10h3M17 14h3"/>',
+  5: '<path d="M6 5v14M10 5v14M14 5v14M18 5v14"/>',
+  6: '<rect x="5" y="5" width="6" height="6" rx="1"/><rect x="13" y="5" width="6" height="6" rx="1"/><rect x="5" y="13" width="6" height="6" rx="1"/><rect x="13" y="13" width="6" height="6" rx="1"/>',
+  7: '<path d="M4 7h9M7 12h10M10 17h10"/>',
+  8: '<circle cx="12" cy="12" r="7"/><path d="M12 12l4-4M12 5v2"/>',
+  9: '<path d="M5 6h14M5 18h14M12 9v7M9 13l3 3 3-3"/>',
+  10: '<path d="M6 6l6 12 6-12M9 6h6"/>',
+};
+function medalSvg(no, state) {
+  return `<svg class="msvg ${state || 'none'}" viewBox="0 0 64 76" aria-hidden="true">`
+    + `<path d="M18 2h11l7 22H25z" class="rib a"/><path d="M46 2H35l-7 22h11z" class="rib b"/>`
+    + `<circle cx="32" cy="48" r="24" class="disc"/><circle cx="32" cy="48" r="19" class="ring"/>`
+    + (state ? `<path d="M16 40a17 17 0 0 1 14-11" class="shine"/>` : '')
+    + `<g transform="translate(20 36)" class="ico">${MEDAL_ICON[no] || ''}</g></svg>`;
+}
+
 function partsFor(i) {
   const s = STAGES[i];
   if (s.only) return s.only;
@@ -467,6 +498,12 @@ function headHtml() {
   </section>`;
 }
 
+function medalCard(no, medal) {
+  const bk = BOOKS.find((x) => x.no === no), { got, all } = bookStars(no);
+  const sub = medal === 'gold' ? `별 ${got}/${all}을 다 모아서 금메달이에요.` : `은메달이에요. 별 ${got}/${all} — 남은 별을 다 모으면 금메달로 바뀌어요.`;
+  return `<div class="medalcard ${medal}">${medalSvg(no, medal)}<div><b>${no}부 ${bk.name} 클리어!</b><p>${sub}</p></div></div>`;
+}
+
 function checkHtml() {
   const s = cur.s, next = STAGES[cur.i + 1];
   let after = '';
@@ -476,6 +513,7 @@ function checkHtml() {
   return `<div class="check">
     ${cur.pass ? '' : `<button data-a="check" class="primary">확인</button>`}
     ${cur.msg ? `<p class="msg ${cur.pass ? 'good' : 'badmsg'}">${cur.msg}</p>` : ''}
+    ${cur.pass && cur.medal ? medalCard(s.book, cur.medal) : ''}
     ${after}
     ${cur.pass && cur.share ? `<button data-a="share">기록 남기기</button>` : ''}
   </div>`;
@@ -993,11 +1031,13 @@ function passed() {
   const s = cur.s, T = cur.sub || s, asm = !!(T.asm || T.pm4), cost = asm ? cur.prog.length : costOf(cur.circ);
   cur.pass = true;
   cur.share = null;
+  cur.medal = null;
   cur.sel = null;
   if (s.rounds) {
     cur.round++;
     if (cur.round < s.rounds) { cur.msg = `맞았어요 · ${cur.round} / ${s.rounds}`; return; }
   }
+  const medalBefore = bookMedal(s.book);
   const v = rec(s.id);
   const first = !v.solved;
   v.solved = true;
@@ -1009,6 +1049,8 @@ function passed() {
   if (s.par) m += cost <= s.par ? ` ${what} — 별 두 개.` : ` ${what}. ${s.par}${unit} 이하면 별 하나 더.`;
   if (first && s.unlock) m += ` 이제부터 <b>${s.unlock}</b>를 상자 하나로 써요.`;
   cur.msg = m;
+  const medal = bookMedal(s.book);
+  if (medal && medal !== medalBefore) cur.medal = medal;
   cur.share = shareText(s, v);
 }
 
@@ -1018,6 +1060,7 @@ function shareText(s, v) {
   const done = book.filter((x) => (save[x.id] || {}).solved).length;
   const got = book.reduce((t, x) => t + starsOf(x), 0), all = book.reduce((t, x) => t + maxStars(x), 0);
   const bk = BOOKS.find((x) => x.no === s.book);
+  if (cur && cur.medal) return `NAND 게임 ${s.book}부(${bk.name}) 클리어! ${cur.medal === 'gold' ? '금메달' : '은메달'} · 별 ${got}/${all}`;
   if (done === book.length && s === book[book.length - 1]) return `NAND 게임 ${s.book}부(${bk.name}) 클리어! 별 ${got}/${all}`;
   return `NAND 게임 ${s.id} ${s.title} ${starStr(s)}${v.count > 1 ? ` (${v.count}번째)` : ''} · ${s.book}부 ${done}/${book.length}`;
 }
@@ -1139,6 +1182,11 @@ function tapTarget(t) {
 }
 
 // ---------- 목록 ----------
+function shelfHtml() {
+  const ms = BOOKS.map((bk) => bookMedal(bk.no)), n = ms.filter(Boolean).length;
+  return `<div class="shelf"><div class="shelfhd">트로피 <span>${n} / ${BOOKS.length}</span></div><div class="medals">${BOOKS.map((bk, i) => `<button class="medal ${ms[i] || 'none'}" data-a="tobook" data-b="${bk.no}" aria-label="${bk.no}부 ${bk.name}${ms[i] ? (ms[i] === 'gold' ? ' 금메달' : ' 은메달') : ''}">${medalSvg(bk.no, ms[i])}<span>${bk.no}부</span></button>`).join('')}</div></div>`;
+}
+
 function renderList() {
   const firstOpen = STAGES.findIndex((s, i) => unlocked(i) && !(save[s.id] || {}).solved);
   const solved = STAGES.filter((s) => (save[s.id] || {}).solved).length;
@@ -1146,12 +1194,13 @@ function renderList() {
   const emblem = `<svg class="emblem" viewBox="0 0 120 64" aria-hidden="true"><path d="M4 20H34M4 44H34M92 32H116" class="ew"/><path d="M30 8H58A24 24 0 0 1 58 56H30Z" class="eb"/><circle cx="88" cy="32" r="5" class="eb"/><circle cx="4" cy="20" r="3.5" class="ep"/><circle cx="4" cy="44" r="3.5" class="ep"/><circle cx="116" cy="32" r="3.5" class="ep"/></svg>`;
   let h = `<header class="hero">${emblem}<h1>NAND 게임</h1><p>NAND 게이트 하나에서 시작해 GPU까지. 만든 부품은 다음 단계에서 상자 하나가 되고, 같은 개념을 여러 번 다르게 풀며 손에 익혀요.</p>
   <div class="meter"><div class="mrow"><b>${solved}</b><span>/ ${STAGES.length} 풂</span><span class="mpct">${pct}%</span></div><div class="mbar"><i style="width:${pct}%"></i></div>
+  ${shelfHtml()}
   ${firstOpen >= 0 ? `<a class="btn primary go" href="#s/${STAGES[firstOpen].id}">이어서 ${STAGES[firstOpen].id} ${STAGES[firstOpen].title} →</a>` : ''}</div></header>`;
   for (const bk of BOOKS) {
     const list = STAGES.filter((s) => s.book === bk.no);
     const done = list.filter((s) => (save[s.id] || {}).solved).length;
     const full = list.length && done === list.length;
-    h += `<section class="book${list.length ? '' : ' soon'}${full ? ' full' : ''}"><div class="bhead"><span class="bno">${bk.no}</span><div class="btxt"><h2>${bk.name}</h2><p class="bdesc">${bk.desc}</p></div>${list.length ? `<span class="bcount">${done}/${list.length}</span>` : ''}</div>`;
+    h += `<section class="book${list.length ? '' : ' soon'}${full ? ' full' : ''}" id="b${bk.no}"><div class="bhead"><span class="bno">${bk.no}</span><div class="btxt"><h2>${bk.name}</h2><p class="bdesc">${bk.desc}</p></div>${list.length ? `<span class="bcount">${done}/${list.length}</span>` : ''}</div>`;
     if (list.length) h += `<div class="bbar"><i style="width:${(done / list.length) * 100}%"></i></div>`;
     if (!list.length) { h += '<p class="soonp">준비 중</p></section>'; continue; }
     h += '<ol class="stages">';
@@ -1286,6 +1335,8 @@ app.addEventListener('touchmove', (e) => { if (drag && (drag.port || drag.part))
 
 app.addEventListener('click', (e) => {
   const u = e.target.closest('[data-a="unlock"]');
+  const mb = e.target.closest('[data-a="tobook"]');
+  if (mb && !cur) { const el = document.getElementById('b' + mb.dataset.b); if (el) el.scrollIntoView({ behavior: 'smooth' }); return; }
   if (u && !cur) { ALL = !ALL; try { localStorage.setItem(ALLKEY, ALL ? '1' : '0'); } catch (er) { /* 없어도 됨 */ } return renderList(); }
   if (e.target.tagName === 'INPUT') return; // 직접 넣기 칸은 change에서
   if (cur && !e.target.closest('svg.board-svg')) tap(e);

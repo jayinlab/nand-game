@@ -2,7 +2,7 @@
   --bg: #f6f4ef; --card: #ffffff; --ink: #1d1f24; --mute: #6b6f78; --line: #dcd8cf;
   --on: #d9861c; --off: #a9adb5; --x: #c9473d; --ok: #2f8a4c; --accent: #d9861c;
   --part: #eef0f4; --partline: #59606c; --slot: #d9861c;
-  --board: #fbfaf6; --dot: #d9d4c8; --glow: rgba(217,134,28,.35); --chip: #2b2f38; --chipink: #f3efe6; --lit: #fbedd9;
+  --board: #fbfaf6; --dot: #d9d4c8; --glow: rgba(217,134,28,.35); --chip: #2b2f38; --chipink: #f3efe6; --lit: #fbedd9; --gold: #e9b23a; --golddk: #b07a12; --silver: #c3c8d1; --silverdk: #858c98;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -10,7 +10,7 @@
     --bg: #16181d; --card: #1f2229; --ink: #e9e7e2; --mute: #9399a3; --line: #343842;
     --on: #f0ad4e; --off: #5b616c; --x: #e5675c; --ok: #5cc27e; --accent: #f0ad4e;
     --part: #2a2e37; --partline: #9aa1ad; --slot: #f0ad4e;
-    --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427;
+    --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427; --gold: #f2c14e; --golddk: #b98a1e; --silver: #c9ced6; --silverdk: #8b929e;
     color-scheme: dark;
   }
 }
@@ -18,7 +18,7 @@
   --bg: #16181d; --card: #1f2229; --ink: #e9e7e2; --mute: #9399a3; --line: #343842;
   --on: #f0ad4e; --off: #5b616c; --x: #e5675c; --ok: #5cc27e; --accent: #f0ad4e;
   --part: #2a2e37; --partline: #9aa1ad; --slot: #f0ad4e;
-  --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427;
+  --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427; --gold: #f2c14e; --golddk: #b98a1e; --silver: #c9ced6; --silverdk: #8b929e;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -264,3 +264,36 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .vkobj li.none { color: var(--mute); list-style: none; margin-left: -18px; }
 .cplog.low li b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .vpal button[data-op^="vk"] { font-size: 11px; }
+
+/* 트로피 */
+.shelf { margin-top: 14px; }
+.shelfhd { font-size: 13px; font-weight: 700; color: var(--mute); }
+.shelfhd span { font-weight: 500; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.medals { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px 6px; margin-top: 6px; }
+.medal { all: unset; cursor: pointer; display: grid; justify-items: center; gap: 0; -webkit-tap-highlight-color: transparent; }
+.medal span { font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.medal.gold span, .medal.silver span { color: var(--ink); font-weight: 600; }
+.msvg { width: 44px; height: 52px; display: block; overflow: visible; }
+.msvg .rib { stroke: none; }
+.msvg .ico { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.msvg.none .rib { fill: var(--part); }
+.msvg.none .disc { fill: none; stroke: var(--line); stroke-width: 2; stroke-dasharray: 4 4; }
+.msvg.none .ring { fill: none; stroke: none; }
+.msvg.none .ico { stroke: var(--line); }
+.msvg.gold .rib.a, .msvg.silver .rib.a { fill: var(--accent); }
+.msvg.gold .rib.b, .msvg.silver .rib.b { fill: color-mix(in srgb, var(--accent) 65%, #000); }
+.msvg.gold .disc { fill: var(--gold); stroke: var(--golddk); stroke-width: 2; }
+.msvg.silver .disc { fill: var(--silver); stroke: var(--silverdk); stroke-width: 2; }
+.msvg.gold .ring { fill: none; stroke: var(--golddk); stroke-width: 1.2; opacity: .6; }
+.msvg.silver .ring { fill: none; stroke: var(--silverdk); stroke-width: 1.2; opacity: .6; }
+.msvg.gold .ico { stroke: #5a3d05; }
+.msvg.silver .ico { stroke: #3c424c; }
+.msvg .shine { fill: none; stroke: #fff; stroke-width: 2.5; stroke-linecap: round; opacity: .55; }
+.medal.gold .msvg { filter: drop-shadow(0 0 6px color-mix(in srgb, var(--gold) 55%, transparent)); }
+.medalcard { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 16px; background: var(--card); border: 1px solid var(--line); width: 100%; }
+.medalcard.gold { border-color: var(--gold); box-shadow: 0 0 18px color-mix(in srgb, var(--gold) 35%, transparent); }
+.medalcard .msvg { width: 72px; height: 86px; flex: none; animation: medalIn .7s cubic-bezier(.2, 1.4, .4, 1) both; transform-origin: 50% 0; }
+.medalcard b { font-size: 18px; display: block; }
+.medalcard p { margin: 4px 0 0; font-size: 14px; color: var(--mute); }
+@keyframes medalIn { 0% { transform: translateY(-14px) rotate(-14deg) scale(.6); opacity: 0; } 60% { transform: rotate(6deg) scale(1.05); opacity: 1; } 100% { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .medalcard .msvg { animation: none; } }
