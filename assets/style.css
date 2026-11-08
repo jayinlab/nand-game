@@ -2,7 +2,7 @@
   --bg: #f6f4ef; --card: #ffffff; --ink: #1d1f24; --mute: #6b6f78; --line: #dcd8cf;
   --on: #d9861c; --off: #a9adb5; --x: #c9473d; --ok: #2f8a4c; --accent: #d9861c;
   --part: #eef0f4; --partline: #59606c; --slot: #d9861c;
-  --board: #fbfaf6; --dot: #d9d4c8; --glow: rgba(217,134,28,.35); --chip: #2b2f38; --chipink: #f3efe6;
+  --board: #fbfaf6; --dot: #d9d4c8; --glow: rgba(217,134,28,.35); --chip: #2b2f38; --chipink: #f3efe6; --lit: #fbedd9;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -10,7 +10,7 @@
     --bg: #16181d; --card: #1f2229; --ink: #e9e7e2; --mute: #9399a3; --line: #343842;
     --on: #f0ad4e; --off: #5b616c; --x: #e5675c; --ok: #5cc27e; --accent: #f0ad4e;
     --part: #2a2e37; --partline: #9aa1ad; --slot: #f0ad4e;
-    --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6;
+    --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427;
     color-scheme: dark;
   }
 }
@@ -18,7 +18,7 @@
   --bg: #16181d; --card: #1f2229; --ink: #e9e7e2; --mute: #9399a3; --line: #343842;
   --on: #f0ad4e; --off: #5b616c; --x: #e5675c; --ok: #5cc27e; --accent: #f0ad4e;
   --part: #2a2e37; --partline: #9aa1ad; --slot: #f0ad4e;
-  --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6;
+  --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -101,13 +101,30 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .board-svg .wire { fill: none; stroke-width: 3; stroke-linecap: round; pointer-events: none; }
 .board-svg .flow { fill: none; stroke: #fff6e0; stroke-width: 1.4; stroke-linecap: round; stroke-dasharray: 2 12; opacity: .85; pointer-events: none; animation: flow .9s linear infinite; }
 @keyframes flow { to { stroke-dashoffset: -14; } }
-@media (prefers-reduced-motion: reduce) { .board-svg .flow { animation: none; } }
+/* 신호 번짐 — 값이 바뀐 곳만 --d만큼 늦게 새 색으로(그 사이엔 옛 색) */
+.board-svg .chg { animation: .22s ease-out var(--d, 0ms) backwards; }
+.board-svg .wire.on.chg { animation-name: wireOn; }
+.board-svg .wire.off.chg { animation-name: wireOff; }
+.board-svg .flow.chg { animation: flow .9s linear infinite, fadeIn .22s ease-out var(--d, 0ms) backwards; }
+.board-svg .part.gate.lit.chg { animation-name: gateOn; }
+.board-svg .part.gate.chg:not(.lit) { animation-name: gateOff; }
+.board-svg .port.on.chg, .board-svg .io.lamp.on.chg { animation-name: dotOn; }
+.board-svg .port.off.chg, .board-svg .io.lamp.off.chg { animation-name: dotOff; }
+.board-svg .ioval.chg { animation-name: fadeIn; }
+@keyframes wireOn { from { stroke: var(--off); } }
+@keyframes wireOff { from { stroke: var(--on); } }
+@keyframes dotOn { from { fill: var(--off); } }
+@keyframes dotOff { from { fill: var(--on); } }
+@keyframes fadeIn { from { opacity: 0; } }
+@keyframes gateOn { from { fill: var(--card); } }
+@keyframes gateOff { from { fill: var(--lit); } }
+@media (prefers-reduced-motion: reduce) { .board-svg .flow, .board-svg .chg, .board-svg .flow.chg { animation: none; } }
 .board-svg .wire.on { stroke: var(--on); }
 .board-svg .wire.off { stroke: var(--off); stroke-width: 2.5; }
 .board-svg .wire.x { stroke: var(--x); stroke-dasharray: 5 4; }
 .board-svg .phit { fill: transparent; }
 .board-svg .part { fill: var(--card); stroke: var(--partline); stroke-width: 2; stroke-linejoin: round; }
-.board-svg .part.lit { fill: color-mix(in srgb, var(--on) 16%, var(--card)); }
+.board-svg .part.lit { fill: var(--lit); }
 .board-svg .stub, .board-svg .gback { fill: none; stroke: var(--partline); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
 .board-svg .part.chip { fill: var(--chip); stroke: color-mix(in srgb, var(--chip) 70%, #000); }
 .board-svg .notch { fill: var(--board); stroke: none; pointer-events: none; }

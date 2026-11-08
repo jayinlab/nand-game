@@ -234,13 +234,13 @@ function gatePath(type, cx, cy) {
   }
   return { stub, body, back, bubble: bub ? [xe + 3.5, cy] : null, hy };
 }
-function partShape(type, cx, cy, h, sel, out) {
+function partShape(type, cx, cy, h, sel, out, m = { c: '', st: '' }) {
   const def = PARTS[type];
   if (GATES.has(type)) {
     const g = gatePath(type, cx, cy);
     let s = `<path d="${g.stub}" class="stub"/>`;
     if (g.back) s += `<path d="${g.back}" class="gback${sel ? ' sel' : ''}"/>`;
-    s += `<path d="${g.body}" class="part gate${out ? ' lit' : ''}${sel ? ' sel' : ''}"/>`;
+    s += `<path d="${g.body}" class="part gate${out ? ' lit' : ''}${sel ? ' sel' : ''}${m.c}"${m.st}/>`;
     if (g.bubble) s += `<circle cx="${g.bubble[0]}" cy="${g.bubble[1]}" r="3.5" class="part bubble${sel ? ' sel' : ''}"/>`;
     return s + `<text x="${cx}" y="${cy + g.hy + 10}" class="glabel">${type}</text>`;
   }
@@ -268,6 +268,31 @@ function boardSvg(spec, ev) {
   s += `<filter id="glow" filterUnits="userSpaceOnUse" x="-20" y="-20" width="${W + 40}" height="${g.H + 40}"><feGaussianBlur stdDeviation="2.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`;
   s += `<rect x="0" y="0" width="${W}" height="${g.H}" class="bg" fill="url(#dots)" data-k="bg"/>`;
 
+  // 신호 번짐 — 지난번 그림과 값이 달라진 곳만, 입력에서 몇 부품 건너인지(깊이)만큼 늦게 바뀌어 보이게 한다.
+  // 고리(래치)는 처음 만난 곳에서 끊어 깊이를 센다. 판정과는 상관없는 그림일 뿐.
+  const depth = {}, walking = new Set();
+  const dep = (key) => {
+    if (!key || key.startsWith('in:')) return 0;
+    const id = key.split(':')[0];
+    if (depth[id] != null) return depth[id];
+    if (walking.has(id)) return 0;
+    walking.add(id);
+    const p = cur.circ.parts.find((x) => x.id === id);
+    let d = 0;
+    if (p) PARTS[p.type].ins.forEach((_, k) => { d = Math.max(d, dep(cur.circ.wires[id + ':' + k])); });
+    walking.delete(id);
+    return (depth[id] = d + 1);
+  };
+  const maxDep = cur.circ.parts.reduce((m, p) => Math.max(m, dep(p.id + ':0')), 1);
+  const step = Math.min(120, 900 / maxDep), prev = cur.sig, sig = (cur.sig = {});
+  const anim = (key, val) => {
+    sig[key] = val;
+    if (!prev || !(key in prev) || prev[key] === val) return { c: '', st: '' };
+    return { c: ' chg', st: ` style="--d:${Math.round(dep(key) * step)}ms"` };
+  };
+  cur.inVals.forEach((v, i) => anim('in:' + i, v));
+  for (const p of cur.circ.parts) PARTS[p.type].outs.forEach((_, k) => anim(p.id + ':' + k, ev.src(p.id + ':' + k)));
+
   if (sel && sel.t === 'part') {
     const used = new Set(cur.circ.parts.map((p) => p.slot));
     for (let k = 0; k < g.rows * 3; k++) {
@@ -281,16 +306,16 @@ function boardSvg(spec, ev) {
     const a = g.srcPos(src), z = g.sinkPos(sink);
     if (!a || !z) continue;
     const dx = Math.max(24, Math.abs(z[0] - a[0]) / 2);
-    const d = `M${a[0]} ${a[1]} C${a[0] + dx} ${a[1]} ${z[0] - dx} ${z[1]} ${z[0]} ${z[1]}`, c = cls(ev.src(src));
-    s += `<path d="${d}" class="wire ${c}"${c === 'on' ? ' filter="url(#glow)"' : ''}/>`;
-    if (c === 'on') s += `<path d="${d}" class="flow"/>`;
+    const d = `M${a[0]} ${a[1]} C${a[0] + dx} ${a[1]} ${z[0] - dx} ${z[1]} ${z[0]} ${z[1]}`, c = cls(ev.src(src)), m = anim(src, ev.src(src));
+    s += `<path d="${d}" class="wire ${c}${m.c}"${m.st}${c === 'on' ? ' filter="url(#glow)"' : ''}/>`;
+    if (c === 'on') s += `<path d="${d}" class="flow${m.c}"${m.st}/>`;
   }
 
   for (const p of cur.circ.parts) {
     const def = PARTS[p.type], b = g.box[p.id];
     const on = sel && sel.t === 'part' && sel.id === p.id;
     s += `<g data-k="part" data-id="${p.id}"><rect x="${b.cx - BW / 2}" y="${b.cy - b.h / 2}" width="${BW}" height="${b.h}" class="phit"/>`;
-    s += partShape(p.type, b.cx, b.cy, b.h, on, ev.src(p.id + ':0'));
+    s += partShape(p.type, b.cx, b.cy, b.h, on, ev.src(p.id + ':0'), anim(p.id + ':0', ev.src(p.id + ':0')));
     s += `</g>`;
   }
 
@@ -300,26 +325,28 @@ function boardSvg(spec, ev) {
     s += `<text x="17" y="${y + 5}" class="ioname">${name}</text><rect x="31" y="${y - 9}" width="15" height="18" rx="5" class="knob"/><text x="38.5" y="${y + 4.5}" class="ioval">${v}</text></g>`;
   });
   spec.outs.forEach((name, i) => {
-    const [x, y] = g.sinkPos('out:' + i), v = ev.outs[i];
-    s += `<rect x="310" y="${y - 18}" width="46" height="36" rx="10" class="io lamp ${cls(v)}"${v ? ' filter="url(#glow)"' : ''}/>`;
-    s += `<text x="333" y="${y - 3}" class="ioname sm">${name}</text><text x="333" y="${y + 12}" class="ioval c">${v == null ? '–' : v}</text>`;
+    const [x, y] = g.sinkPos('out:' + i), v = ev.outs[i], w = cur.circ.wires['out:' + i];
+    const m = w ? anim(w, ev.src(w)) : { c: '', st: '' };
+    s += `<rect x="310" y="${y - 18}" width="46" height="36" rx="10" class="io lamp ${cls(v)}${m.c}"${m.st}${v ? ' filter="url(#glow)"' : ''}/>`;
+    s += `<text x="333" y="${y - 3}" class="ioname sm">${name}</text><text x="333" y="${y + 12}" class="ioval c${m.c}"${m.st}>${v == null ? '–' : v}</text>`;
   });
 
   // 점은 맨 위에 — 손가락이 닿는 넓은 투명 원 + 보이는 작은 원
   cur.ports = [];
   cur.rows = g.rows; cur.rowY = g.rowY; cur.rowH = g.rowH;
-  const port = (k, key, [x, y], val) => {
+  const port = (k, key, [x, y], val, from) => {
+    const m = from ? anim(from, val) : { c: '', st: '' };
     const on = sel && sel.t === k && sel.key === key;
     cur.ports.push({ t: k, key, x, y });
     const owner = key.startsWith('in:') || key.startsWith('out:') ? '' : ` data-owner="${key.split(':')[0]}"`;
-    return `<g data-k="${k}" data-key="${key}"${owner}><circle cx="${x}" cy="${y}" r="13" class="hit"/><circle cx="${x}" cy="${y}" r="${on ? 8 : 6}" class="port ${cls(val)}${on ? ' sel' : ''}"/></g>`;
+    return `<g data-k="${k}" data-key="${key}"${owner}><circle cx="${x}" cy="${y}" r="13" class="hit"/><circle cx="${x}" cy="${y}" r="${on ? 8 : 6}" class="port ${cls(val)}${on ? ' sel' : ''}${m.c}"${m.st}/></g>`;
   };
   spec.ins.forEach((_, i) => { s += port('src', 'in:' + i, g.srcPos('in:' + i), cur.inVals[i]); });
-  spec.outs.forEach((_, i) => { s += port('sink', 'out:' + i, g.sinkPos('out:' + i), ev.outs[i]); });
+  spec.outs.forEach((_, i) => { s += port('sink', 'out:' + i, g.sinkPos('out:' + i), ev.outs[i], cur.circ.wires['out:' + i]); });
   for (const p of cur.circ.parts) {
     const def = PARTS[p.type];
-    def.ins.forEach((_, k) => { const key = p.id + ':' + k; s += port('sink', key, g.sinkPos(key), cur.circ.wires[key] ? ev.src(cur.circ.wires[key]) : 0); });
-    def.outs.forEach((_, k) => { const key = p.id + ':' + k; s += port('src', key, g.srcPos(key), ev.src(key)); });
+    def.ins.forEach((_, k) => { const key = p.id + ':' + k; s += port('sink', key, g.sinkPos(key), cur.circ.wires[key] ? ev.src(cur.circ.wires[key]) : 0, cur.circ.wires[key]); });
+    def.outs.forEach((_, k) => { const key = p.id + ':' + k; s += port('src', key, g.srcPos(key), ev.src(key), key); });
   }
   return s + '</svg>';
 }
