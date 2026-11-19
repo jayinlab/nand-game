@@ -612,6 +612,7 @@ function renderAsm() {
     ];
     h += `<p class="wavehd">물체</p><ul class="vkobj">${objs.map((o) => `<li>${o}</li>`).join('') || '<li class="none">(아직 없음)</li>'}</ul>`;
     h += `<p class="wavehd">아래로 내려간 것</p><ol class="cplog low">${m.low.map((x) => `<li><b>${x.op}</b> → ${x.low.join(' · ') || '–'}</li>`).join('')}${m.err ? `<li class="bad">${m.err}</li>` : ''}${!m.low.length && !m.err ? '<li class="none">「한 줄」을 눌러 보세요</li>' : ''}</ol>`;
+    h += vkStairs(t, prog, m);
     if (dv.ib.length) h += `<p class="wavehd">IB(녹화 중)</p><p class="ttnote mono">${dv.ib.map(hex8).join(' ')}</p>`;
     if (dv.log.some((l) => /DISPATCH|EVENT|ACQUIRE|펜스/.test(l))) h += `<p class="wavehd">GPU(CP)가 한 것</p><ol class="cplog">${dv.log.filter((l) => /DISPATCH|EVENT|ACQUIRE|SET_SH|INDIRECT|펜스/.test(l)).map((l) => `<li>${l}</li>`).join('')}</ol>`;
   } else if (isDrv(t)) {
@@ -623,6 +624,7 @@ function renderAsm() {
     }).join('') + '</div>';
     const maps = Object.entries(m.pt).sort((x, y) => x[0] - y[0]).map(([vp, pp]) => `가상 ${vp * 4}~${vp * 4 + 3} → 쪽 ${pp}`);
     h += `<p class="wavehd">페이지 표</p><p class="ttnote">${maps.length ? maps.join(' · ') : '(비어 있음)'}</p>`;
+    h += addrMap(m);
     if (m.ib.length) h += `<p class="wavehd">IB(아직 안 낸 것)</p><p class="ttnote mono">${m.ib.map(hex8).join(' ')}</p>`;
     if (m.log.length || m.err) h += `<ol class="cplog">${m.log.map((l) => `<li>${l}</li>`).join('')}${m.err ? `<li class="bad">${m.err}</li>` : ''}</ol>`;
   } else if (isCu(t)) {
@@ -792,6 +794,150 @@ function laneTrail(t, prog, m) {
     + `<p class="ttnote lt-key"><span class="ki"><i class="k-dot"></i>그 줄을 한 레인</span><span class="ki"><i class="k-rest"></i>EXEC가 꺼져 쉰 레인</span><span class="ki"><i class="k-bar"></i>스칼라 줄(웨이브에 한 번)</span>${prog.some((x) => x.op === 'V_READFIRSTLANE') ? '<span class="ki long"><i class="k-read"></i>V_READFIRSTLANE이 읽어 온 레인 — 켜진 첫 레인, 다 꺼졌으면 레인 0</span>' : ''}</p>`;
 }
 
+// ---------- 10부 그림: 내려가기 계단 ----------
+// 줄마다 Vulkan 호출 하나가 어디까지 내려갔나 — 앱(Vulkan) → 드라이버 함수(9부) → PM4(8부) → CU(7부 커널).
+// 속이 빈 점 = 적어 두기만 함(IB에 녹화·제출 줄 세움), 찬 점 = 그 층에서 실제로 돎. 같은 입력으로 처음부터 다시 돌려 줄마다 잰다.
+const STAIR_MAX = 24;
+function vkStairs(t, prog, m) {
+  if (!m.low.length) return `<p class="wavehd">내려가기 계단</p><p class="ttnote">「한 줄」을 누르면 호출마다 어디까지 내려갔는지 그려져요.</p>`;
+  const V = t.asm.v, r = vkInit(V, t.asm.tests[cur.tsel] || {}), rows = [];
+  while (r.low.length < m.low.length && !r.halted && rows.length < 200) {
+    const d = r.drv, ib0 = d.ib.length, lg0 = d.log.length, q0 = d.queue.length, n0 = r.low.length;
+    vkStep(V, prog, r);
+    if (r.low.length === n0) break;
+    const e = r.low[r.low.length - 1], drvN = e.low.filter((x) => !x.startsWith('(') && !x.startsWith('IB에')).length;
+    const newLog = d.log.slice(lg0), pk = newLog.filter((x) => /^(SET_SH_REG|DISPATCH_DIRECT|EVENT_WRITE|ACQUIRE_MEM|INDIRECT_BUFFER|RELEASE_MEM|NOP|WAIT_REG_MEM)/.test(x)).length;
+    const disp = newLog.filter((x) => x.startsWith('DISPATCH_DIRECT')).map((x) => +((/(\d+)사이클/.exec(x) || [])[1] || 0));
+    const ibAdd = e.op === 'vkBeginCommandBuffer' ? 0 : Math.max(0, d.ib.length - ib0);
+    rows.push({ op: e.op, a: (prog[e.pc] || {}).a || [], drvN, ibAdd, queued: d.queue.length > q0 || e.op === 'vkQueueSubmit', pk, disp, bad: !!r.err && r.halted && e === r.low[r.low.length - 1] && !!m.err });
+  }
+  const cut = Math.max(0, rows.length - STAIR_MAX), show = rows.slice(cut);
+  const LX = [158, 210, 262, 322], RH = 30, TOP = 48, W = 360, H = TOP + show.length * RH + 4;
+  let g = '';
+  ['앱', '드라이버', 'PM4', 'CU'].forEach((n, k) => { g += `<rect x="${LX[k] - 25}" y="${2 + k * 6}" width="50" height="18" rx="3" class="vs-step"/><text x="${LX[k]}" y="${15 + k * 6}" class="vs-h">${n}</text>`; });
+  show.forEach((w, i) => {
+    const y = TOP + i * RH + 9, name = w.op === 'END' ? '(끝)' : w.op.replace(/^vk/, '').replace('DescriptorSets', 'DescSets').replace('ComputePipelines', 'Pipelines') + (w.a.length ? ' ' + w.a.join(',') : '');
+    // 각 층: [점 종류, 밑글]
+    const lv = [['run', '']];
+    if (w.drvN) lv.push(['run', `함수 ${w.drvN}`]); else if (w.ibAdd) lv.push(['pass', 'IB에 바로']); else lv.push(null);
+    if (w.pk) lv.push(['run', `패킷 ${w.pk}`]); else if (w.ibAdd) lv.push(['rec', `IB +${w.ibAdd}`]); else if (w.queued) lv.push(['rec', '줄 세움']); else lv.push(null);
+    if (w.disp.length) lv.push(['run', `${w.disp.length > 1 ? w.disp.length + '번 ' : ''}${w.disp.reduce((x, y) => x + y, 0)}사이클`]); else if (w.ibAdd && w.op === 'vkCmdDispatch') lv.push(['rec', '나중에']); else lv.push(null);
+    let deep = 0; lv.forEach((x, k) => { if (x) deep = k; });
+    g += `<text x="0" y="${y + 4}" class="vs-op${w.bad ? ' vs-bad' : ''}">${name.length > 22 ? name.slice(0, 21) + '…' : name}</text>`;
+    if (deep) g += `<path d="M${LX[0]} ${y}${lv.slice(1, deep + 1).map((_, k) => `H${LX[k + 1] - 8}L${LX[k + 1]} ${y}`).join('')}" class="vs-line"/>`;
+    lv.forEach((x, k) => {
+      if (!x) return;
+      if (x[0] === 'pass') { g += `<text x="${LX[k]}" y="${y + 17}" class="vs-sub">${x[1]}</text>`; return; }
+      g += `<circle cx="${LX[k]}" cy="${y}" r="${k ? 5 : 4}" class="vs-${x[0]}${w.bad && k === deep ? ' vs-badc' : ''}"/>`;
+      if (x[1]) g += `<text x="${LX[k]}" y="${y + 17}" class="vs-sub">${x[1]}</text>`;
+    });
+  });
+  return `<p class="wavehd">내려가기 계단${cut ? ` · 앞 ${cut}줄은 접음` : ''}</p><svg class="stairs" viewBox="0 0 ${W} ${H}" role="img" aria-label="Vulkan 호출마다 드라이버·PM4·CU 중 어디까지 내려갔나">${g}</svg>`
+    + `<p class="ttnote lt-key"><span class="ki"><i class="k-vs vs-run"></i>그 층에서 돎</span><span class="ki long"><i class="k-vs vs-rec"></i>적어 두기만 함(IB에 녹화 · 제출 줄 세움) — 돌기는 펜스를 기다릴 때</span>${show.some((w) => !w.drvN && w.ibAdd) ? '<span class="ki long">「IB에 바로」 = 게임은 9부 함수 호출 없이 IB에 직접 적어요 — 실제 RADV에서는 배리어 패킷도 사용자 모드 드라이버가 기록해요</span>' : ''}</p>`;
+}
+
+// ---------- 9부 그림: 주소 길 ----------
+// 위 줄 = GPU 가상 쪽 16개, 아래 줄 = 물리 쪽 8개, 그 사이 화살표 = 페이지 표 한 줄. 버퍼마다 한 색(8부 패킷 색을 같이 씀).
+function addrMap(m) {
+  const VPAGES_N = 16, W = 360, X0 = 4, VW = 20, VG = 2, PW = 42, PG = 2, VY = 22, VH = 24, PY = 112, PH = 52;
+  const vx = (v) => X0 + v * (VW + VG), pxp = (p) => X0 + p * (PW + PG);
+  const col = (o) => (o === 'X' ? 'am-other' : o ? `rg-p${(o - 1) % 4}` : 'am-free');
+  const fault = /가상 주소 (\d+)는 매핑돼 있지 않아요/.exec(m.err || '');
+  const fv = fault ? +fault[1] >> 2 : -1;
+  let g = `<text x="${X0}" y="12" class="am-h">위: GPU 가상 주소(쪽마다 4칸) · 아래: 물리 쪽</text>`;
+  const maps = Object.entries(m.pt).map(([v, p]) => [+v, p]);
+  // 화살표 먼저(칸 밑에 깔리게)
+  for (const [v, p] of maps) {
+    const x1 = vx(v) + VW / 2, y1 = VY + VH, x2 = pxp(p) + PW / 2, y2 = PY - 4;
+    g += `<path d="M${x1} ${y1 + 1}C${x1} ${y1 + 34} ${x2} ${y2 - 30} ${x2} ${y2}" class="am-arrow ${col(m.owner[p])}"/><path d="M${x2 - 4} ${y2 - 5}L${x2} ${y2 + 1}L${x2 + 4} ${y2 - 5}" class="am-tip ${col(m.owner[p])}"/>`;
+  }
+  for (let v = 0; v < VPAGES_N; v++) {
+    const p = m.pt[v], o = p != null ? m.owner[p] : null;
+    g += `<rect x="${vx(v)}" y="${VY}" width="${VW}" height="${VH}" rx="3" class="am-cell ${p != null ? col(o) + ' am-on' : 'am-free'}${v === fv ? ' am-fault' : ''}"/>`;
+    g += `<text x="${vx(v) + VW / 2}" y="${VY + VH / 2 + 3.5}" class="am-v${p != null ? ' am-vin' : ''}">${v === fv ? '✕' : v * 4}</text>`;
+  }
+  for (let p = 0; p < 8; p++) {
+    const o = m.owner[p], x = pxp(p);
+    g += `<rect x="${x}" y="${PY}" width="${PW}" height="${PH}" rx="4" class="am-cell ${col(o)}${o && o !== 'X' ? ' am-on' : ''}"/>`;
+    g += `<text x="${x + PW / 2}" y="${PY + 15}" class="am-p${o && o !== 'X' ? ' am-vin' : ''}">쪽 ${p}</text>`;
+    const d = m.mem.slice(p * 4, p * 4 + 4), dc = `am-d${o && o !== 'X' ? ' am-vin' : ''}`;
+    if (o === 'X') g += `<text x="${x + PW / 2}" y="${PY + 35}" class="${dc}">남의 것</text>`;
+    else [0, 1].forEach((row) => { g += `<text x="${x + PW / 2}" y="${PY + 30 + row * 13}" class="${dc}">${d[row * 2]} ${d[row * 2 + 1]}</text>`; });
+    const rv = m.r.map((h, k) => (h && h === o ? `r${k}` : null)).filter(Boolean);
+    g += `<text x="${x + PW / 2}" y="${PY + PH + 13}" class="am-who">${o === 'X' ? '다른 앱' : o ? `버퍼 ${o}` : '빈 쪽'}</text>`;
+    if (rv.length) g += `<text x="${x + PW / 2}" y="${PY + PH + 25}" class="am-who am-r">${rv.join(',')}</text>`;
+  }
+  const H = PY + PH + 30;
+  return `<p class="wavehd">주소 길${fault ? ` · 가상 ${fault[1]}에서 page fault` : ''}</p><svg class="amap" viewBox="0 0 ${W} ${H}" role="img" aria-label="GPU 가상 쪽에서 물리 쪽으로 가는 페이지 표">${g}</svg>`
+    + `<p class="ttnote lt-key"><span class="ki long"><i class="k-am"></i>화살표 하나 = 페이지 표 한 줄(가상 쪽 → 물리 쪽) · 같은 색 = 같은 버퍼</span>${fault ? '<span class="ki long"><i class="k-rg rg-bad"></i>매핑 안 된 가상 쪽을 읽거나 써서 멈춘 곳</span>' : ''}</p>`;
+}
+
+// ---------- 8부 그림: 링 ----------
+// 링 칸을 원으로 — 내가 쓴 dword는 패킷마다 한 색(헤더 칸 진하게), rptr·wptr는 바늘. CP가 읽을 구간은 rptr에서 wptr까지,
+// 안쪽 호가 CP가 실제로 읽어 간 길. 패킷 가르기는 pm4Run과 같은 헤더 풀기(타입 3 · count+2 dword)로 다시 한다.
+const PK_OP = Object.fromEntries(Object.entries(PM4_OPS).map(([k, v]) => [v.code, k]));
+const PK_SHORT = { NOP: 'NOP', SET_SH_REG: 'SET', DISPATCH_DIRECT: 'DISP', RELEASE_MEM: 'REL', WAIT_REG_MEM: 'WAIT', ACQUIRE_MEM: 'ACQ', EVENT_WRITE: 'EVT', INDIRECT_BUFFER: 'IB' };
+const CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯';
+function ringDial(t, prog, r) {
+  const P = t.pm4, N = P.ring || 16, r0 = P.rptr || 0, len = Math.min(prog.length, N);
+  const wp = r.wptr == null ? r0 : r.wptr, avail = (wp - r0 + N) % N;
+  const cell = Array.from({ length: N }, () => ({ pk: -1, head: false, mine: false, live: false, bad: false }));
+  for (let k = 0; k < len; k++) cell[(r0 + k) % N].mine = true;
+  for (let k = 0; k < avail; k++) cell[(r0 + k) % N].live = true;
+  const pks = [];
+  let i = 0, stop = null; // stop = CP가 못 풀고 멈춘 칸(링 안 순서)
+  while (i < avail) {
+    const at = (r0 + i) % N, h = r.ring[at], op = h >>> 30 === 3 ? PK_OP[(h >>> 8) & 0xff] : null;
+    if (!op) { cell[at].bad = true; stop = i; break; }
+    const n = ((h >>> 16) & 0x3fff) + 2;
+    for (let k = i; k < Math.min(i + n, avail); k++) cell[(r0 + k) % N].pk = pks.length;
+    cell[at].head = true;
+    pks.push({ op, at, n, cut: i + n > avail, ib: op === 'INDIRECT_BUFFER' ? r.ring[(at + 3) % N] : null });
+    if (i + n > avail) { stop = avail; break; }
+    i += n;
+  }
+  const read = r.err ? (stop ?? avail) : avail; // CP가 읽어 간 dword 수(그림용)
+  const cx = 180, cy = 165, RO = 112, RI = 76, step = (2 * Math.PI) / N;
+  const ang = (j) => -Math.PI / 2 + j * step, px = (a, rad) => (cx + rad * Math.cos(a)).toFixed(1), py = (a, rad) => (cy + rad * Math.sin(a)).toFixed(1);
+  const wedge = (j, ro, ri, gap) => {
+    const a0 = ang(j) + gap, a1 = ang(j + 1) - gap;
+    return `M${px(a0, ro)} ${py(a0, ro)}A${ro} ${ro} 0 0 1 ${px(a1, ro)} ${py(a1, ro)}L${px(a1, ri)} ${py(a1, ri)}A${ri} ${ri} 0 0 0 ${px(a0, ri)} ${py(a0, ri)}Z`;
+  };
+  let g = '';
+  const used = new Set();
+  cell.forEach((c, j) => {
+    let cls = 'rg-empty';
+    if (c.bad || (c.live && c.pk < 0)) { cls = 'rg-bad'; used.add('bad'); }
+    else if (c.pk >= 0) cls = `rg-p${c.pk % 4}${c.head ? ' rg-head' : ''}`;
+    else if (c.mine) { cls = 'rg-wait'; used.add('wait'); }
+    g += `<path d="${wedge(j, RO, RI, 0.012)}" class="rg-cell ${cls}"/>`;
+    const a = ang(j + 0.5);
+    if (N <= 16 || j % 4 === 0) g += `<text x="${px(a, RO + 11)}" y="${(+py(a, RO + 11) + 3.5).toFixed(1)}" class="rg-ix">${j}</text>`;
+    if (c.head && c.pk >= 0) g += `<text x="${px(a, (RO + RI) / 2)}" y="${(+py(a, (RO + RI) / 2) + 3.5).toFixed(1)}" class="rg-op">${N <= 16 ? PK_SHORT[pks[c.pk].op] : CIRC[c.pk] || c.pk + 1}</text>`;
+    if (c.bad) g += `<text x="${px(a, (RO + RI) / 2)}" y="${(+py(a, (RO + RI) / 2) + 4).toFixed(1)}" class="rg-x">✕</text>`;
+  });
+  // CP가 읽어 간 길: 안쪽 호
+  if (read > 0) {
+    const a0 = ang(r0) + 0.03, a1 = ang(r0 + read) - 0.03, RR = RI - 8, big = a1 - a0 > Math.PI ? 1 : 0;
+    g += read >= N ? `<circle cx="${cx}" cy="${cy}" r="${RR}" class="rg-path"/>` : `<path d="M${px(a0, RR)} ${py(a0, RR)}A${RR} ${RR} 0 ${big} 1 ${px(a1, RR)} ${py(a1, RR)}" class="rg-path"/>`;
+    g += `<circle cx="${px(a1, RR)}" cy="${py(a1, RR)}" r="3.5" class="rg-pathend"/>`;
+  }
+  // 바늘: 칸 경계를 가리킴
+  // 바늘은 링을 가로지르는 짧은 막대, 이름은 링 밖(칸 번호보다 바깥)
+  const needle = (j, label, cls) => {
+    const a = ang(j), c = Math.cos(a), out = RO + 22, anchor = c > 0.35 ? 'start' : c < -0.35 ? 'end' : 'middle';
+    return `<line x1="${px(a, RI - 12)}" y1="${py(a, RI - 12)}" x2="${px(a, RO + 16)}" y2="${py(a, RO + 16)}" class="rg-needle ${cls}"/><circle cx="${px(a, RI - 12)}" cy="${py(a, RI - 12)}" r="3" class="rg-hub ${cls}"/><text x="${px(a, out)}" y="${(+py(a, out) + 4).toFixed(1)}" text-anchor="${anchor}" class="rg-nl ${cls}">${label}</text>`;
+  };
+  const rEnd = r.err ? r0 : r.rptr;
+  if (wp === rEnd) g += needle(wp, 'rptr=wptr', 'rg-w');
+  else { g += needle(wp, 'wptr', 'rg-w'); g += needle(rEnd, 'rptr', 'rg-r'); }
+  g += `<text x="${cx}" y="${cy - 2}" class="rg-c">${avail ? `${avail} dword` : '읽을 것 없음'}</text><text x="${cx}" y="${cy + 13}" class="rg-cs">${r.err ? 'CP가 멈춤' : avail ? `rptr ${r0} → ${r.rptr}` : P.doorbell && cur.db == null ? '도어벨 전' : `rptr = wptr = ${r0}`}</text>`;
+  const KEY = { bad: '게임 CP가 풀지 못한 칸 — 게임은 타입 3 헤더만 풀어요(실제 PM4엔 타입 2 패딩 같은 것도 있어요)', wait: '써 놓았지만 wptr 밖 — CP는 아직 몰라요' };
+  const list = pks.map((p, k) => `<span class="ki long"><i class="k-rg rg-p${k % 4}"></i>${CIRC[k] || k + 1} ${p.op} · ${p.at}${p.n > 1 ? `~${(p.at + p.n - 1) % N}` : ''}번 칸${p.ib != null ? ` → IB ${p.ib} dword` : ''}${p.cut ? ' · 본문이 wptr 밖으로 잘림' : ''}</span>`).join('');
+  return `<p class="wavehd">링</p><svg class="ring" viewBox="-20 0 400 330" role="img" aria-label="링 버퍼 칸과 rptr·wptr">${g}</svg>`
+    + `<p class="ttnote lt-key">${list}${Object.keys(KEY).filter((k) => used.has(k)).map((k) => `<span class="ki long"><i class="k-rg rg-${k}"></i>${KEY[k]}</span>`).join('')}${read > 0 ? '<span class="ki long"><i class="k-path"></i>CP가 읽어 간 길</span>' : ''}</p>`;
+}
+
 // ---------- 8부 PM4 ----------
 const OPLIST = (t) => t.pm4.ops, REGLIST = (t) => t.pm4.regs;
 const NAMEOF = Object.fromEntries(Object.entries(SH_REGS).map(([k, v]) => [v, k]));
@@ -848,6 +994,7 @@ function renderPm4() {
   h += `<p class="wavehd">CP가 읽은 것 · rptr ${r0} → ${r.err ? '멈춤' : r.rptr}</p><ol class="cplog">${r.log.map((l) => `<li>${l}</li>`).join('')}${r.err ? `<li class="bad">${r.err}</li>` : ''}${!r.log.length && !r.err ? '<li class="none">(읽은 패킷 없음)</li>' : ''}</ol>`;
   const shs = Object.entries(r.sh).filter(([ad]) => NAMEOF[ad]).map(([ad, val]) => `<span>${NAMEOF[ad].replace('COMPUTE_', '')} <b>${val >= 16 ? '0x' + val.toString(16) : val}</b></span>`);
   if (shs.length) h += `<div class="sregs">${shs.join('')}</div>`;
+  h += ringDial(t, prog, r);
   const wantM = (x.want || {}).mem || {}, init = Array.from({ length: MEMN }, (_, i) => (x.mem && x.mem[i]) || 0);
   if (Object.keys(wantM).length || x.mem) h += '<p class="wavehd">기억</p><div class="ram">' + r.mem.map((y, k) => `<div class="cell${y !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}${k in wantM ? ' goal' : ''}"><small>[${k}]</small>${y}</div>`).join('') + '</div>';
   h += '</div>';

@@ -3,6 +3,7 @@
   --on: #d9861c; --off: #a9adb5; --x: #c9473d; --ok: #2f8a4c; --accent: #d9861c;
   --part: #eef0f4; --partline: #59606c; --slot: #d9861c;
   --board: #fbfaf6; --dot: #d9d4c8; --glow: rgba(217,134,28,.35); --chip: #2b2f38; --chipink: #f3efe6; --lit: #fbedd9; --gold: #e9b23a; --golddk: #b07a12; --silver: #c3c8d1; --silverdk: #858c98;
+  --pk0: #c97a14; --pk1: #2a8a86; --pk2: #5b62c4; --pk3: #b8506f;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -11,6 +12,7 @@
     --on: #f0ad4e; --off: #5b616c; --x: #e5675c; --ok: #5cc27e; --accent: #f0ad4e;
     --part: #2a2e37; --partline: #9aa1ad; --slot: #f0ad4e;
     --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427; --gold: #f2c14e; --golddk: #b98a1e; --silver: #c9ced6; --silverdk: #8b929e;
+    --pk0: #e29a3a; --pk1: #3fb3ad; --pk2: #8a90e8; --pk3: #e07c9a;
     color-scheme: dark;
   }
 }
@@ -19,6 +21,7 @@
   --on: #f0ad4e; --off: #5b616c; --x: #e5675c; --ok: #5cc27e; --accent: #f0ad4e;
   --part: #2a2e37; --partline: #9aa1ad; --slot: #f0ad4e;
   --board: #111318; --dot: #2a2e37; --glow: rgba(240,173,78,.45); --chip: #3a3f4a; --chipink: #f3efe6; --lit: #3d3427; --gold: #f2c14e; --golddk: #b98a1e; --silver: #c9ced6; --silverdk: #8b929e;
+    --pk0: #e29a3a; --pk1: #3fb3ad; --pk2: #8a90e8; --pk3: #e07c9a;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -334,3 +337,64 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .lt-key .k-cs.cs-mem { opacity: .5; }
 .strip .cs-up { fill: none; stroke: var(--mute); stroke-width: 1; stroke-dasharray: 3 2; opacity: .8; }
 .lt-key .k-cs.cs-up { border: 1px dashed var(--mute); background: none; }
+/* 8부 그림: 링 */
+.ring { width: 100%; max-width: 400px; display: block; margin: 4px auto; font-variant-numeric: tabular-nums; }
+.ring .rg-cell { stroke: var(--card); stroke-width: 1; }
+.rg-empty { fill: var(--line); opacity: .55; background: var(--line); }
+.rg-p0 { fill: var(--pk0); background: var(--pk0); } .rg-p1 { fill: var(--pk1); background: var(--pk1); }
+.rg-p2 { fill: var(--pk2); background: var(--pk2); } .rg-p3 { fill: var(--pk3); background: var(--pk3); }
+.ring .rg-cell[class*="rg-p"] { opacity: .45; }
+.ring .rg-cell.rg-head { opacity: 1; }
+.rg-bad { fill: var(--x); opacity: .8; background: var(--x); }
+.ring .rg-wait { fill: none; stroke: var(--mute); stroke-width: 1.2; stroke-dasharray: 3 2; }
+.ring .rg-ix { font-size: 9px; fill: var(--mute); text-anchor: middle; }
+.ring .rg-op { font-size: 10px; font-weight: 700; fill: var(--card); text-anchor: middle; }
+.ring .rg-x { font-size: 12px; font-weight: 700; fill: var(--card); text-anchor: middle; }
+.ring .rg-path { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
+.ring .rg-pathend { fill: var(--accent); }
+.ring .rg-needle { stroke-width: 2.5; stroke-linecap: round; }
+.ring .rg-needle.rg-w { stroke: var(--ink); }
+.ring .rg-needle.rg-r { stroke: var(--accent); }
+.ring .rg-hub.rg-w { fill: var(--ink); } .ring .rg-hub.rg-r { fill: var(--accent); }
+.ring .rg-nl { font-size: 11px; font-weight: 700; paint-order: stroke; stroke: var(--card); stroke-width: 3px; }
+.ring .rg-nl.rg-w { fill: var(--ink); } .ring .rg-nl.rg-r { fill: var(--accent); }
+.ring .rg-c { font-size: 13px; font-weight: 700; fill: var(--ink); text-anchor: middle; }
+.ring .rg-cs { font-size: 10px; fill: var(--mute); text-anchor: middle; }
+.lt-key .k-rg { width: 12px; height: 10px; border-radius: 2px; }
+.lt-key .k-rg.rg-wait { border: 1px dashed var(--mute); background: none; }
+.lt-key .k-path { width: 18px; height: 3px; border-radius: 2px; background: var(--accent); }
+/* 9부 그림: 주소 길 */
+.amap { width: 100%; max-width: 400px; display: block; margin: 4px 0; font-variant-numeric: tabular-nums; }
+.amap .am-h { font-size: 10px; fill: var(--mute); }
+.amap .am-cell { stroke: var(--line); stroke-width: 1; }
+.amap .am-free { fill: var(--card); }
+.amap .am-other { fill: var(--line); }
+.amap .am-cell.am-on { stroke: none; }
+.amap .am-fault { fill: var(--x); stroke: none; }
+.amap .am-v { font-size: 8.5px; fill: var(--mute); text-anchor: middle; }
+.amap .am-p { font-size: 10px; font-weight: 700; fill: var(--ink); text-anchor: middle; }
+.amap .am-d { font-size: 9px; fill: var(--ink); text-anchor: middle; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.amap .am-vin { fill: var(--card); }
+.amap .am-fault + .am-v { fill: var(--card); font-weight: 700; }
+.amap .am-who { font-size: 8.5px; fill: var(--mute); text-anchor: middle; }
+.amap .am-arrow { fill: none; stroke-width: 2; opacity: .85; }
+.amap .am-tip { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.amap .am-arrow.rg-p0, .amap .am-tip.rg-p0 { stroke: var(--pk0); } .amap .am-arrow.rg-p1, .amap .am-tip.rg-p1 { stroke: var(--pk1); }
+.amap .am-arrow.rg-p2, .amap .am-tip.rg-p2 { stroke: var(--pk2); } .amap .am-arrow.rg-p3, .amap .am-tip.rg-p3 { stroke: var(--pk3); }
+.amap .am-arrow.am-free, .amap .am-tip.am-free, .amap .am-arrow.am-other, .amap .am-tip.am-other { stroke: var(--mute); }
+.lt-key .k-am { width: 18px; height: 2px; background: var(--mute); }
+.amap .am-r { fill: var(--ink); font-weight: 700; }
+/* 10부 그림: 내려가기 계단 */
+.stairs { width: 100%; max-width: 420px; display: block; margin: 4px 0; font-variant-numeric: tabular-nums; }
+.stairs .vs-step { fill: var(--part); }
+.stairs .vs-h { font-size: 10px; font-weight: 700; fill: var(--ink); text-anchor: middle; }
+.stairs .vs-op { font-size: 10.5px; fill: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.stairs .vs-op.vs-bad { fill: var(--x); font-weight: 700; }
+.stairs .vs-line { fill: none; stroke: var(--accent); stroke-width: 2; opacity: .7; stroke-linejoin: round; }
+.stairs .vs-run { fill: var(--accent); }
+.stairs .vs-rec { fill: var(--card); stroke: var(--accent); stroke-width: 2; }
+.stairs .vs-badc { fill: var(--x); stroke: var(--x); }
+.stairs .vs-sub { font-size: 8.5px; fill: var(--mute); text-anchor: middle; }
+.lt-key .k-vs { width: 10px; height: 10px; border-radius: 50%; }
+.lt-key .k-vs.vs-run { background: var(--accent); }
+.lt-key .k-vs.vs-rec { border: 2px solid var(--accent); }
