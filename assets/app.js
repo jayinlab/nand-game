@@ -196,7 +196,7 @@ function openStage(i) {
   const s = STAGES[i];
   const v = rec(s.id);
   cur = {
-    i, s, sel: null, undo: [], msg: '', pass: false, round: 0, hintOpen: false, hintStep: 1, nearMsg: '',
+    i, s, sel: null, undo: [], msg: '', pass: false, round: 0, hintOpen: false, nearMsg: '',
     circ: !temp(s) && v.circ ? JSON.parse(JSON.stringify(v.circ)) : { parts: [], wires: {} },
     table: s.random ? randomTable(s.random) : null,
     sub: s.pool ? pickPool(s) : null,
@@ -482,7 +482,6 @@ function renderStage() {
   <p class="cost">NAND ${cost}개 몫${s.par ? ` · 별 두 개는 ${s.par}개 이하` : ''}${v.best != null ? ` · 최고 ${v.best}` : ''}</p>
   ${spec.seq ? timeline(spec) : truthTable(spec)}
   ${checkHtml()}`;
-  hookHints();
 }
 
 function headHtml() {
@@ -519,10 +518,6 @@ function checkHtml() {
   </div>`;
 }
 
-function hookHints() {
-  const d = app.querySelector('details.hints');
-  if (d) d.addEventListener('toggle', () => { cur.hintOpen = d.open; });
-}
 
 // ---------- 4부 어셈블리 ----------
 // 기계 둘: 4부 작은 컴퓨터(cpu) · 5부 작은 웨이브(vec). 편집기·시험 표는 같이 쓴다
@@ -706,7 +701,6 @@ function renderAsm() {
   else if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();
   app.innerHTML = h;
-  hookHints();
 }
 
 // ---------- 8부 PM4 ----------
@@ -780,7 +774,6 @@ function renderPm4() {
   h += '</tbody></table>';
   h += checkHtml();
   app.innerHTML = h;
-  hookHints();
 }
 // ---------- 9부 레지스터 배정 ----------
 const raRun = (t, k) => cuRun(parseVec(raSubst(t.ra.prog, t.ra.temps, cur.prog)), t.ra.asm, t.ra.tests[k]);
@@ -816,7 +809,6 @@ function renderRa() {
   h += '</tbody></table>';
   h += checkHtml();
   app.innerHTML = h;
-  hookHints();
 }
 function checkRa() {
   const t = cur.sub || cur.s;
@@ -897,17 +889,17 @@ function asmAction(a, t) {
 }
 
 // ---------- 힌트 ----------
-// 한 단계씩 연다. 글 힌트를 다 열면 「정답 가까이 놓기」.
+// 왼쪽 [힌트] = 글 힌트를 한꺼번에 펼침/접음, 오른쪽 [정답] = 정답 가까이 놓기. 둘은 따로 논다(재희 11-19).
+// 정답을 써도 별은 그대로 받는다.
 function hintBox(s) {
   const hs = s.hints || [];
   if (!hs.length) return '';
-  const shown = hs.slice(0, cur.hintStep);
-  let h = `<details class="hints" ${cur.hintOpen ? 'open' : ''}><summary>힌트 ${cur.nearMsg ? hs.length + 1 : cur.hintStep} / ${hs.length + 1}</summary>`;
-  h += shown.map((t, k) => `<p><span class="hn">${k + 1}</span>${t}</p>`).join('');
-  if (cur.hintStep < hs.length) h += `<button data-a="hintnext">다음 힌트</button>`;
-  else if (cur.nearMsg) h += `<p class="nearmsg">${cur.nearMsg}</p><button data-a="near">다시 놓기</button>`;
-  else h += `<button data-a="near">${hs.length + 1}. 정답 가까이 놓기</button><small class="nearnote">지금 판을 바꿔요 — 되돌리기로 돌아올 수 있어요</small>`;
-  return h + '</details>';
+  let h = `<div class="hints"><div class="hintbar">`;
+  h += `<button data-a="hint" class="${cur.hintOpen ? 'on' : ''}">${cur.hintOpen ? '힌트 접기' : '힌트'}</button>`;
+  h += `<button data-a="near">${cur.nearMsg ? '정답 다시 놓기' : '정답'}</button></div>`;
+  if (cur.hintOpen) h += hs.map((t, k) => `<p><span class="hn">${k + 1}</span>${t}</p>`).join('');
+  h += cur.nearMsg ? `<p class="nearmsg">${cur.nearMsg}</p>` : `<small class="nearnote">정답은 판을 바꿔요 — 되돌리기로 돌아올 수 있어요</small>`;
+  return h + '</div>';
 }
 
 // sol 글('x=NAND(A,B); @0=x', 'h.1' = h의 둘째 출력)을 판으로. 부품은 깊이(입력에서 몇 번째)대로 왼쪽→오른쪽 열에 놓는다.
@@ -1141,15 +1133,15 @@ function tapTarget(t) {
       cur.inVals = cur.inVals.map(() => 0);
     } else if (a === 'ttall') {
       cur.ttAll = !cur.ttAll;
-    } else if (a === 'hintnext') {
-      cur.hintStep++; cur.hintOpen = true;
+    } else if (a === 'hint') {
+      cur.hintOpen = !cur.hintOpen;
     } else if (a === 'near') {
       near();
     } else if (a === 'check') {
       check();
     } else if (a === 'round') {
       if (cur.s.random) cur.table = randomTable(cur.s.random);
-      if (cur.s.pool) { cur.sub = pickPool(cur.s, cur.sub); cur.hintStep = 1; cur.ttAll = false; }
+      if (cur.s.pool) { cur.sub = pickPool(cur.s, cur.sub); cur.hintOpen = false; cur.ttAll = false; }
       cur.live = {}; cur.stepAt = null;
       cur.circ = { parts: [], wires: {} };
       cur.undo = []; cur.pass = false; cur.msg = ''; cur.nearMsg = '';
