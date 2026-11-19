@@ -320,3 +320,17 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .lt-key .k-bar { width: 18px; height: 5px; border-radius: 3px; background: var(--mute); opacity: .55; }
 .lt-key .k-read { width: 9px; height: 9px; border-radius: 2px; border: 2px solid var(--accent); }
 .lt-key .ki.long { white-space: normal; }
+
+/* 6·7부 그림: 사이클 띠 */
+.strip { width: 100%; max-width: 480px; display: block; margin: 4px 0; }
+.strip .cs-name { font-size: 11px; fill: var(--ink); }
+.strip .cs-tick { font-size: 9px; fill: var(--mute); }
+.cs-run { fill: var(--accent); background: var(--accent); }
+.cs-mem { fill: var(--mute); opacity: .5; background: var(--mute); }
+.cs-bar { fill: url(#cs-hatch); background: repeating-linear-gradient(45deg, var(--mute) 0 2px, transparent 2px 4px); }
+.strip .cs-hatchline { fill: var(--mute); }
+.cs-ready { fill: var(--line); background: var(--line); }
+.lt-key .k-cs { width: 12px; height: 10px; border-radius: 2px; }
+.lt-key .k-cs.cs-mem { opacity: .5; }
+.strip .cs-up { fill: none; stroke: var(--mute); stroke-width: 1; stroke-dasharray: 3 2; opacity: .8; }
+.lt-key .k-cs.cs-up { border: 1px dashed var(--mute); background: none; }

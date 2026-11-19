@@ -642,6 +642,7 @@ function renderAsm() {
       }
       h += '</tbody></table>';
     }
+    h += cycleStrip(t, prog, m);
     const x0 = t.asm.tests[cur.tsel] || {}, init = Array.from({ length: MEMN }, (_, i) => (x0.mem && x0.mem[i]) || 0), wantM = (x0.want || {}).mem || {};
     h += '<p class="wavehd">기억</p><div class="ram">' + m.mem.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}${k in wantM ? ' goal' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
     if (t.asm.ops.some((o) => o.startsWith('DS_'))) h += '<p class="wavehd">LDS</p><div class="ram">' + m.lds[0].map((x, k) => `<div class="cell${x ? ' chg' : ''}"><small>${k}</small>${x}</div>`).join('') + '</div>';
@@ -702,6 +703,54 @@ function renderAsm() {
   else if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();
   app.innerHTML = h;
+}
+
+// ---------- 6·7부 그림: 사이클 띠 ----------
+// 웨이브마다 한 줄, 사이클마다 한 칸 — 그 사이클에 이 웨이브가 한 줄을 돌았나(계산), 읽기를 기다렸나, 배리어에 섰나,
+// 돌 수 있는데 CU가 다른 웨이브를 돌렸나(쉼), 아직 못 올라왔나. 같은 입력으로 처음부터 다시 돌려 사이클마다 적는다.
+const STRIP_MAX = 120;
+function cycleStrip(t, prog, m) {
+  if (!m.t) return `<p class="wavehd">사이클 띠</p><p class="ttnote">「한 줄」을 누르면 사이클마다 웨이브가 계산했는지 기다렸는지 그려져요.</p>`;
+  const r = cuInit(t.asm, t.asm.tests[cur.tsel] || {}, prog), cols = [];
+  while (!r.halted && r.t < m.t && r.t < 3000) {
+    const before = r.waves.map((w) => ({ steps: w.steps, halted: w.halted }));
+    cuStep(prog, r);
+    cols.push(r.waves.map((w, i) => {
+      const b = before[i];
+      if (b.halted) return 'done';
+      if (w.steps > b.steps || w.halted) return 'run';
+      if (!w.live) return 'up';
+      return w.wait === 'cnt' ? 'mem' : w.wait === 'bar' ? 'bar' : 'ready';
+    }));
+  }
+  const cut = Math.max(0, cols.length - STRIP_MAX), show = cols.slice(cut);
+  const A = t.asm, multi = (A.wgs || 1) > 1 || (A.cus || 1) > 1;
+  const name = (w) => (multi ? `WG${w.wg}${A.waves > 1 ? `·${w.w}` : ''} CU${w.cu}` : r.waves.length > 1 ? `웨이브 ${w.w}` : '웨이브');
+  const LW = multi ? 78 : 58, W = 360, CW = Math.min(12, (W - LW) / Math.max(show.length, 1)), RH = 18, TOP = 16;
+  const H = TOP + r.waves.length * (RH + 6) + 4;
+  let g = '', used = new Set();
+  r.waves.forEach((w, i) => {
+    const y = TOP + i * (RH + 6);
+    g += `<text x="0" y="${y + RH - 5}" class="cs-name">${name(w)}</text>`;
+    // 계산 칸은 한 줄씩 나누고, 기다림·쉼·못 올라옴은 이어진 구간을 한 덩어리로
+    const gap = CW > 4 ? 1 : 0;
+    for (let k = 0; k < show.length;) {
+      const st = show[k][i];
+      let e = k + 1;
+      if (st !== 'run') while (e < show.length && show[e][i] === st) e++;
+      if (st !== 'done') {
+        used.add(st);
+        const inset = st === 'up' ? 0.5 : 0;
+        g += `<rect x="${(LW + k * CW + inset).toFixed(1)}" y="${y + inset}" width="${Math.max((e - k) * CW - gap - 2 * inset, 1).toFixed(1)}" height="${RH - 2 * inset}" rx="1.5" class="cs-${st}"/>`;
+      }
+      k = e;
+    }
+  });
+  for (let c = 0; c <= show.length; c += 10) g += `<text x="${(LW + c * CW).toFixed(1)}" y="10" class="cs-tick">${c + cut}</text>`;
+  const KEY = { run: '계산(한 줄)', mem: '읽기 기다림', bar: '배리어에서 기다림', ready: '돌 수 있지만 CU가 다른 웨이브를 돌림', up: '자리가 없어 아직 못 올라옴' };
+  const pat = '<defs><pattern id="cs-hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2" height="4" class="cs-hatchline"/></pattern></defs>';
+  return `<p class="wavehd">사이클 띠${cut ? ` · 앞 ${cut}사이클은 접음` : ''}</p><svg class="strip" viewBox="0 0 ${W} ${H}" role="img" aria-label="사이클마다 웨이브가 한 일">${pat}${g}</svg>`
+    + `<p class="ttnote lt-key">${Object.keys(KEY).filter((k) => used.has(k)).map((k) => `<span class="ki${k === 'ready' || k === 'up' ? ' long' : ''}"><i class="k-cs cs-${k}"></i>${KEY[k]}</span>`).join('')}</p>`;
 }
 
 // ---------- 5부 그림: 레인 길 ----------
