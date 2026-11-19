@@ -1125,22 +1125,22 @@ function asmAction(a, t) {
 }
 
 // ---------- 힌트 ----------
-// 왼쪽 [힌트] = 글 힌트를 한꺼번에 펼침/접음, 오른쪽 [정답] = 정답 가까이 놓기. 둘은 따로 논다(재희 11-19).
+// 왼쪽 [힌트] = 글 힌트를 펼치며 정답 가까이 놓기(나머지 몇 개는 직접), 오른쪽 [정답] = 정답을 통째로 놓기(재희 11-19).
 // 정답을 써도 별은 그대로 받는다.
 function hintBox(s) {
   const hs = s.hints || [];
   if (!hs.length) return '';
   let h = `<div class="hints"><div class="hintbar">`;
   h += `<button data-a="hint" class="${cur.hintOpen ? 'on' : ''}">${cur.hintOpen ? '힌트 접기' : '힌트'}</button>`;
-  h += `<button data-a="near">${cur.nearMsg ? '정답 다시 놓기' : '정답'}</button></div>`;
+  h += `<button data-a="full">정답</button></div>`;
   if (cur.hintOpen) h += hs.map((t, k) => `<p><span class="hn">${k + 1}</span>${t}</p>`).join('');
-  h += cur.nearMsg ? `<p class="nearmsg">${cur.nearMsg}</p>` : `<small class="nearnote">정답은 판을 바꿔요 — 되돌리기로 돌아올 수 있어요</small>`;
+  h += cur.nearMsg ? `<p class="nearmsg">${cur.nearMsg}</p>` : `<small class="nearnote">힌트·정답은 판을 바꿔요 — 되돌리기로 돌아올 수 있어요</small>`;
   return h + '</div>';
 }
 
 // sol 글('x=NAND(A,B); @0=x', 'h.1' = h의 둘째 출력)을 판으로. 부품은 깊이(입력에서 몇 번째)대로 왼쪽→오른쪽 열에 놓는다.
-// 출력 선은 늘 비우고, keepLast가 false면 마지막 부품으로 들어가는 선도 비워 둔다.
-function solCircuit(sol, insNames, keepLast) {
+// 출력 선은 비우고(full이면 잇는다), keepLast가 false면 마지막 부품으로 들어가는 선도 비워 둔다.
+function solCircuit(sol, insNames, keepLast, full) {
   const ids = {}, depth = {}, parts = [], wires = {}, outs = [];
   insNames.forEach((n, i) => { ids[n] = 'in:' + i; });
   const sts = sol.split(';').map((x) => x.trim()).filter(Boolean);
@@ -1168,7 +1168,11 @@ function solCircuit(sol, insNames, keepLast) {
     used.add(p.slot);
   }
   parts.forEach((p) => delete p.d);
-  let cut = outs.length; // 출력 선은 늘 비운다
+  let cut = outs.length; // 출력 선은 비운다
+  if (full) {
+    for (const [o, src] of outs) { const [a, k = '0'] = src.trim().split('.'); wires[o] = ids[a].startsWith('in:') ? ids[a] : ids[a] + ':' + k; }
+    return { circ: { parts, wires }, cut: 0 };
+  }
   if (!keepLast) {
     const last = parts[parts.length - 1].id;
     for (const k of Object.keys(wires)) if (k.startsWith(last + ':')) { delete wires[k]; cut++; }
@@ -1186,6 +1190,49 @@ function nearRandom(spec) {
   st.push('@0=' + acc);
   const row = spec.ins.map((x, i) => `${x}=${bits[i]}`).join(', ');
   return { ...solCircuit(st.join('; '), spec.ins, true), row };
+}
+
+// 무작위 표 통째 정답: 1인 줄마다 「이 줄일 때만 1」을 만들어 OR로 모은다. NOT은 입력마다 하나만.
+function fullRandom(spec) {
+  const n = spec.ins.length, st = [], nots = {}, terms = [];
+  cur.table.forEach((v, r) => {
+    if (!v) return;
+    const bits = bitsOf(r, n), lits = spec.ins.map((x, i) => {
+      if (bits[i]) return x;
+      if (!nots[i]) { nots[i] = 'n' + i; st.push(`n${i}=NOT(${x})`); }
+      return nots[i];
+    });
+    let acc = lits[0];
+    for (let k = 1; k < lits.length; k++) { st.push(`a${r}_${k}=AND(${acc},${lits[k]})`); acc = `a${r}_${k}`; }
+    terms.push(acc);
+  });
+  let acc = terms[0];
+  for (let k = 1; k < terms.length; k++) { st.push(`o${k}=OR(${acc},${terms[k]})`); acc = 'o' + k; }
+  st.push('@0=' + acc);
+  return solCircuit(st.join('; '), spec.ins, true, true);
+}
+
+// [정답] — 판에 정답을 통째로 놓는다.
+function fullSol() {
+  const s = cur.s, spec = specOf(), t = cur.sub || s;
+  if (t.ra) {
+    const sol = t.sol.split(' ').map((x) => +x.slice(1));
+    changeProg(() => { sol.forEach((r, i) => { cur.prog[i] = r; }); });
+  } else if (t.pm4) {
+    const sol = parsePm4(t.sol).dw;
+    changeProg(() => { cur.prog.splice(0, cur.prog.length, ...sol); });
+    cur.asel = null;
+    if (t.pm4.doorbell) { const N = t.pm4.ring || 16; cur.db = ((t.pm4.rptr || 0) + sol.length) % N; if (!temp(s)) { rec(s.id).db = cur.db; persist(); } }
+  } else if (t.asm) {
+    const sol = parseSol(t);
+    changeProg(() => { cur.prog.splice(0, cur.prog.length, ...sol); });
+    cur.asel = null;
+  } else {
+    const { circ } = s.random ? fullRandom(spec) : solCircuit(t.sol, spec.ins, true, true);
+    change((c) => { c.parts = circ.parts; c.wires = circ.wires; });
+    cur.sel = null;
+  }
+  cur.nearMsg = `정답을 놓았어요 — 「확인」을 눌러 돌려 봐요.`;
 }
 
 function near() {
@@ -1371,8 +1418,9 @@ function tapTarget(t) {
       cur.ttAll = !cur.ttAll;
     } else if (a === 'hint') {
       cur.hintOpen = !cur.hintOpen;
-    } else if (a === 'near') {
-      near();
+      if (cur.hintOpen && !cur.nearMsg) near();
+    } else if (a === 'full') {
+      fullSol();
     } else if (a === 'check') {
       check();
     } else if (a === 'round') {
