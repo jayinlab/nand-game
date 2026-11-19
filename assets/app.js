@@ -653,6 +653,7 @@ function renderAsm() {
       h += `<tr class="${on ? '' : 'off'}"><td>${l}</td><td class="bit${on ? ' on' : ''}">${on}</td><td class="bit${(m.vcc >> l) & 1 ? ' on' : ''}">${(m.vcc >> l) & 1}</td>${m.v.map((r) => `<td>${r[l]}</td>`).join('')}</tr>`;
     }
     h += `</tbody></table><div class="sregs">${m.s.map((x, k) => `<span>s${k} <b>${x}</b></span>`).join('')}</div>`;
+    h += laneTrail(t, prog, m);
   } else {
     h += `<div class="regs"><span>PC <b>${m.pc}</b></span><span>A <b>${m.a}</b> <small>${m.a.toString(2).padStart(8, '0')}</small></span><span>${state}</span></div>`;
     h += '<div class="ram">' + m.ram.map((x, k) => `<div class="cell${x !== init[k] ? ' chg' : ''}${init[k] ? ' given' : ''}"><small>[${k}]</small>${x}</div>`).join('') + '</div>';
@@ -701,6 +702,45 @@ function renderAsm() {
   else if (vec) h += `<p class="ttnote">처음엔 v0 = 레인 번호(단순화), 적지 않은 레지스터는 0 · 걸음 수는 끝 줄을 빼고 세요${t.asm.exec != null ? ` · EXEC 레인 ${lanesOf(t.asm.exec)}만 켜짐` : ''}</p>`;
   h += checkHtml();
   app.innerHTML = h;
+}
+
+// ---------- 5부 그림: 레인 길 ----------
+// 지금까지 돈 줄을 위에서 아래로, 레인 넷을 세로 줄로. 켜진 레인은 진하게, EXEC가 꺼진 레인은 흐리게 — if/else 갈라짐이 보인다.
+// 같은 시험 입력으로 처음부터 다시 돌려 걸음마다 EXEC를 적는다(기계 상태는 건드리지 않음).
+const TRAIL_MAX = 30;
+function laneTrail(t, prog, m) {
+  if (!m.steps && !m.halted) return `<p class="wavehd">레인 길</p><p class="ttnote">「한 줄」을 누르면 줄마다 어느 레인이 했는지 그려져요.</p>`;
+  const r = vecInit(t.asm, t.asm.tests[cur.tsel] || {}), rows = [];
+  while (!r.halted && r.steps < m.steps && prog[r.pc]) {
+    const { op } = prog[r.pc], exec = r.exec;
+    let first = 0; while (first < LANES && !((exec >> first) & 1)) first++;
+    rows.push({ pc: r.pc, op, exec, first });
+    vecStep(prog, r);
+  }
+  if (m.halted && prog[r.pc] && prog[r.pc].op === 'S_ENDPGM') rows.push({ pc: r.pc, op: 'S_ENDPGM', exec: r.exec, first: -1 });
+  const cut = Math.max(0, rows.length - TRAIL_MAX), show = rows.slice(cut);
+  const RH = 22, TOP = 26, X0 = 178, DX = 44, W = X0 + DX * (LANES - 1) + 24, H = TOP + show.length * RH + 6;
+  const lx = (l) => X0 + l * DX, ry = (i) => TOP + i * RH + RH / 2;
+  let g = '';
+  for (let l = 0; l < LANES; l++) g += `<text x="${lx(l)}" y="14" class="lt-h">레인 ${l}</text>`;
+  // 세로 줄: 그 걸음에 켜져 있던 레인만 진하게
+  show.forEach((w, i) => {
+    for (let l = 0; l < LANES; l++) g += `<line x1="${lx(l)}" y1="${ry(i) - RH / 2}" x2="${lx(l)}" y2="${ry(i) + RH / 2}" class="${(w.exec >> l) & 1 ? 'lt-on' : 'lt-off'}"/>`;
+  });
+  show.forEach((w, i) => {
+    const y = ry(i), vec = w.op.startsWith('V_');
+    g += `<text x="0" y="${y + 4}" class="lt-op"><tspan class="lt-pc">${w.pc}</tspan> ${w.op}</text>`;
+    if (w.op === 'V_READFIRSTLANE') {
+      // 「한 레인」이 아니라 「읽어 온 레인」 — 켜진 첫 레인, 다 꺼졌으면 레인 0 (11-19 OCL)
+      g += `<rect x="${lx(w.first < LANES ? w.first : 0) - 6}" y="${y - 6}" width="12" height="12" rx="2" class="lt-read"/>`;
+    } else if (vec) {
+      for (let l = 0; l < LANES; l++) g += (w.exec >> l) & 1 ? `<circle cx="${lx(l)}" cy="${y}" r="6" class="lt-dot"/>` : `<circle cx="${lx(l)}" cy="${y}" r="5" class="lt-rest"/>`;
+    } else {
+      g += `<rect x="${lx(0) - 8}" y="${y - 3}" width="${lx(LANES - 1) - lx(0) + 16}" height="6" rx="3" class="lt-bar"/>`;
+    }
+  });
+  return `<p class="wavehd">레인 길${cut ? ` · 앞 ${cut}걸음은 접음` : ''}</p><svg class="trail" viewBox="0 0 ${W} ${H}" role="img" aria-label="줄마다 레인 넷이 한 일">${g}</svg>`
+    + `<p class="ttnote lt-key"><span class="ki"><i class="k-dot"></i>그 줄을 한 레인</span><span class="ki"><i class="k-rest"></i>EXEC가 꺼져 쉰 레인</span><span class="ki"><i class="k-bar"></i>스칼라 줄(웨이브에 한 번)</span>${prog.some((x) => x.op === 'V_READFIRSTLANE') ? '<span class="ki long"><i class="k-read"></i>V_READFIRSTLANE이 읽어 온 레인 — 켜진 첫 레인, 다 꺼졌으면 레인 0</span>' : ''}</p>`;
 }
 
 // ---------- 8부 PM4 ----------

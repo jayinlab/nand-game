@@ -300,3 +300,23 @@ summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .medalcard p { margin: 4px 0 0; font-size: 14px; color: var(--mute); }
 @keyframes medalIn { 0% { transform: translateY(-14px) rotate(-14deg) scale(.6); opacity: 0; } 60% { transform: rotate(6deg) scale(1.05); opacity: 1; } 100% { transform: none; } }
 @media (prefers-reduced-motion: reduce) { .medalcard .msvg { animation: none; } }
+
+/* 5부 그림: 레인 길 */
+.trail { width: 100%; max-width: 420px; display: block; margin: 4px 0; font-variant-numeric: tabular-nums; }
+.trail .lt-h { font-size: 11px; fill: var(--mute); text-anchor: middle; }
+.trail .lt-op { font-size: 12px; fill: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.trail .lt-pc { fill: var(--mute); }
+.trail .lt-on { stroke: var(--accent); stroke-width: 3; }
+.trail .lt-off { stroke: var(--line); stroke-width: 2; stroke-dasharray: 3 4; }
+.trail .lt-dot { fill: var(--accent); }
+.trail .lt-rest { fill: var(--card); stroke: var(--mute); stroke-width: 1.5; opacity: .6; }
+.trail .lt-read { fill: var(--card); stroke: var(--accent); stroke-width: 2.5; }
+.trail .lt-bar { fill: var(--mute); opacity: .55; }
+.lt-key { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.lt-key .ki { white-space: nowrap; }
+.lt-key i { display: inline-block; vertical-align: middle; margin-right: 4px; }
+.lt-key .k-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.lt-key .k-rest { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--mute); opacity: .6; }
+.lt-key .k-bar { width: 18px; height: 5px; border-radius: 3px; background: var(--mute); opacity: .55; }
+.lt-key .k-read { width: 9px; height: 9px; border-radius: 2px; border: 2px solid var(--accent); }
+.lt-key .ki.long { white-space: normal; }
